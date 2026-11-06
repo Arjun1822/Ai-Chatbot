@@ -3,8 +3,10 @@
 **Auditor / Engineering Lead:** Principal AI & QA Automation Engineer  
 **Project:** ORBIT AI CHAT – Advanced AI Agent Platform  
 **Repository Branch:** `master`  
-**Latest Milestone Commit:** `d3991f4` (`feat: complete transformation to ORBIT Advanced AI Agent Platform (Phases 0-14)`)  
-**Baseline Checkpoint Commit:** `2e52ea9` (`checkpoint-baseline-phase0: baseline application state before agent platform enhancement`)
+**Latest Milestone Commit:** `a380aeb` (`feat(llm): wire stream_response with custom system prompt and robust env discovery`)  
+**Previous Transformation Commit:** `d3991f4` (`feat: complete transformation to ORBIT Advanced AI Agent Platform (Phases 0-14)`)  
+**Baseline Checkpoint Commit:** `2e52ea9` (`checkpoint-baseline-phase0: baseline application state before agent platform enhancement`)  
+**Remote Repository:** `https://github.com/Arjun1822/Ai-Chatbot.git` (Branch `master` up to date)
 
 ---
 
