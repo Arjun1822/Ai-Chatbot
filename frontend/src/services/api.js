@@ -10,26 +10,85 @@ const api = axios.create({
   },
 })
 
+// Attach authorization token if present in localStorage
+api.interceptors.request.use((config) => {
+  const token = localStorage.getItem('orbit_token')
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`
+  }
+  return config
+})
+
+// System & Health
 export const getHealth = () => api.get('/health')
+export const getMetrics = () => api.get('/admin/metrics')
+
+// Authentication
+export const registerUser = (email, password, name) =>
+  api.post('/auth/register', { email, password, name })
+export const loginUser = (email, password) =>
+  api.post('/auth/login', { email, password })
+export const getMe = () => api.get('/auth/me')
+export const logoutUser = () => {
+  localStorage.removeItem('orbit_token')
+  return api.post('/auth/logout')
+}
+
+// Conversations
 export const getConversations = () => api.get('/conversations')
 export const getConversation = (id) => api.get(`/conversations/${id}`)
-export const createConversation = (title = 'New conversation') => api.post('/conversations', { title })
-export const updateConversation = (id, title) => api.patch(`/conversations/${id}`, { title })
+export const createConversation = (title = 'New conversation') =>
+  api.post('/conversations', { title })
+export const updateConversation = (id, title) =>
+  api.patch(`/conversations/${id}`, { title })
 export const deleteConversation = (id) => api.delete(`/conversations/${id}`)
-export const sendMessage = (conversationId, message, attachment = null) =>
-  api.post('/chat', { conversation_id: conversationId, message, attachment })
 
-export async function streamMessage(conversationId, message, attachment, { onChunk, onDone, onError }) {
+// Chat
+export const sendMessage = (conversationId, message, attachment = null, mode = 'chat') =>
+  api.post('/chat', { conversation_id: conversationId, message, attachment, mode })
+
+// RAG Documents
+export const listDocuments = () => api.get('/documents')
+export const uploadDocument = (file) => {
+  const formData = new FormData()
+  formData.append('file', file)
+  return api.post('/documents', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+}
+export const deleteDocument = (id) => api.delete(`/documents/${id}`)
+
+// Persistent Memory
+export const listMemories = (category) =>
+  api.get('/memories', { params: category ? { category } : {} })
+export const createMemory = (content, category = 'fact', importance = 3) =>
+  api.post('/memories', { content, category, importance })
+export const updateMemory = (id, data) => api.patch(`/memories/${id}`, data)
+export const deleteMemory = (id) => api.delete(`/memories/${id}`)
+
+// Streaming Chat with Agent & Document modes
+export async function streamMessage(
+  conversationId,
+  message,
+  attachment,
+  { onChunk, onDone, onError, onToolCall, onToolResult },
+  mode = 'chat'
+) {
   try {
+    const headers = { 'Content-Type': 'application/json' }
+    const token = localStorage.getItem('orbit_token')
+    if (token) {
+      headers.Authorization = `Bearer ${token}`
+    }
+
     const response = await fetch(`${BASE_URL}/chat/stream`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers,
       body: JSON.stringify({
         conversation_id: conversationId,
         message,
         attachment,
+        mode,
       }),
     })
 
@@ -63,11 +122,15 @@ export async function streamMessage(conversationId, message, attachment, { onChu
           try {
             const data = JSON.parse(trimmed.slice(6))
             if (data.type === 'chunk') {
-              onChunk(data.text)
+              onChunk(data.text || data.content || '')
+            } else if (data.type === 'tool_call') {
+              if (onToolCall) onToolCall(data)
+            } else if (data.type === 'tool_result') {
+              if (onToolResult) onToolResult(data)
             } else if (data.type === 'done') {
               onDone(data)
             } else if (data.type === 'error') {
-              onError(new Error(data.error))
+              onError(new Error(data.error || data.message || 'Stream error'))
             }
           } catch {
             // ignore non-json line

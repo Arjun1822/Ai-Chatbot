@@ -20,3 +20,6 @@ Thumbs.db
 frontend/build/
 .coverage
 audit_artifacts/chrome_profile_*
+
+# Local Database Runtime Data
+backend/data/*.json

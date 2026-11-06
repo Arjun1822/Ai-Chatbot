@@ -1,15 +1,26 @@
-import json
+import base64
 from collections import defaultdict
 from datetime import datetime, timezone
+import json
+import logging
+import os
 from threading import Lock
 from time import monotonic
+import uuid
 
-from flask import Flask, Response, jsonify, request, stream_with_context
+from flask import Flask, Response, g, jsonify, request, stream_with_context
 from flask_cors import CORS
 
+from agent.orchestrator import AgentOrchestrator
 from config import Config
+from memory.memory_manager import MemoryManager
+from rag.rag_service import RAGService
+from services.auth_service import auth_service, get_current_user_from_request, require_auth
 from services.conversation_store import ConversationStore
 from services.llm_service import LLMService
+from services.user_store import UserStore
+
+logger = logging.getLogger(__name__)
 
 
 class RateLimiter:
@@ -52,10 +63,10 @@ def create_title_from_text(text: str, max_length: int = 48) -> str:
     return truncated + "..."
 
 
-def create_app(config_class=Config, store=None, llm=None):
+def create_app(config_class=Config, store=None, llm=None, user_st=None, rag_svc=None, mem_mgr=None):
     app = Flask(__name__)
     app.config.from_object(config_class)
-    app.config["MAX_CONTENT_LENGTH"] = 512 * 1024  # 512 KB to allow text attachments
+    app.config["MAX_CONTENT_LENGTH"] = getattr(config_class, "MAX_CONTENT_LENGTH", 512 * 1024)
 
     allowed_origins = getattr(config_class, "FRONTEND_URLS", [app.config.get("FRONTEND_URL", "http://localhost:3000")])
     CORS(
@@ -65,19 +76,37 @@ def create_app(config_class=Config, store=None, llm=None):
         expose_headers=["Content-Type", "Authorization"],
     )
 
+    data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+    os.makedirs(data_dir, exist_ok=True)
+
     conversation_store = store or ConversationStore(config_class)
     llm_service = llm or LLMService(config_class)
+    user_store = user_st or UserStore(persistence_path=os.path.join(data_dir, "users.json"))
+    rag_service = rag_svc or RAGService(data_dir=data_dir)
+    memory_manager = mem_mgr or MemoryManager(data_dir=data_dir)
+
+    orchestrator = AgentOrchestrator(
+        llm_service=llm_service,
+        rag_service=rag_service,
+        memory_manager=memory_manager,
+    )
+
     rate_limiter = RateLimiter(
         limit=app.config.get("RATE_LIMIT_REQUESTS", 60),
         window=app.config.get("RATE_LIMIT_WINDOW_SECONDS", 60),
     )
 
     def get_client_ip():
-        # Prefer X-Forwarded-For if behind a reverse proxy, falling back to remote_addr
         forwarded = request.headers.get("X-Forwarded-For")
         if forwarded:
             return forwarded.split(",")[0].strip()
         return request.remote_addr or "127.0.0.1"
+
+    def get_user_id():
+        user = get_current_user_from_request()
+        if not user or user.get("is_guest"):
+            return None
+        return user.get("id")
 
     @app.after_request
     def set_security_headers(response):
@@ -91,13 +120,17 @@ def create_app(config_class=Config, store=None, llm=None):
     def bad_request(error):
         return jsonify(error=getattr(error, "description", "Bad Request")), 400
 
+    @app.errorhandler(401)
+    def unauthorized(_error):
+        return jsonify(error="Unauthorized. Please authenticate."), 401
+
     @app.errorhandler(404)
     def not_found(_error):
         return jsonify(error="Resource not found."), 404
 
     @app.errorhandler(413)
     def request_too_large(_error):
-        return jsonify(error="Request payload is too large. Max size is 512 KB."), 413
+        return jsonify(error="Request payload is too large. Max size is 10 MB."), 413
 
     @app.errorhandler(429)
     def rate_limit_exceeded(_error):
@@ -107,6 +140,9 @@ def create_app(config_class=Config, store=None, llm=None):
     def internal_server_error(_error):
         return jsonify(error="Internal server error. Please try again later."), 500
 
+    # =========================================================================
+    # HEALTH & OBSERVABILITY
+    # =========================================================================
     @app.get("/api/health")
     def health():
         return jsonify(
@@ -114,11 +150,76 @@ def create_app(config_class=Config, store=None, llm=None):
             database="connected" if conversation_store.health() else "in-memory",
             llm_configured=llm_service.configured,
             model=getattr(llm_service, "model", "default"),
+            tools_registered=len(orchestrator.tool_registry.list_tools()),
         )
 
+    @app.get("/api/admin/metrics")
+    def get_metrics():
+        uid = get_user_id()
+        return jsonify(
+            metrics={
+                "conversations_count": len(conversation_store.list(user_id=None)),
+                "documents_count": len(rag_service.list_documents(user_id=None)),
+                "memories_count": len(memory_manager.get_user_memories(user_id=uid)),
+                "database_mode": "mongodb" if conversation_store.using_mongodb else "in-memory",
+                "tools_available": [t.name for t in orchestrator.tool_registry.list_tools()],
+            }
+        )
+
+    # =========================================================================
+    # AUTHENTICATION
+    # =========================================================================
+    @app.post("/api/auth/register")
+    def register():
+        payload = request.get_json(silent=True) or {}
+        email = payload.get("email")
+        password = payload.get("password")
+        name = payload.get("name")
+
+        if not email or not password:
+            return jsonify(error="Email and password are required."), 400
+
+        try:
+            user = user_store.create_user(email=email, password=password, name=name)
+            token = auth_service.generate_token(user)
+            return jsonify(user=user, token=token), 201
+        except ValueError as e:
+            return jsonify(error=str(e)), 400
+
+    @app.post("/api/auth/login")
+    def login():
+        payload = request.get_json(silent=True) or {}
+        email = payload.get("email")
+        password = payload.get("password")
+
+        if not email or not password:
+            return jsonify(error="Email and password are required."), 400
+
+        user = user_store.authenticate(email=email, password=password)
+        if not user:
+            return jsonify(error="Invalid email or password."), 401
+
+        token = auth_service.generate_token(user)
+        return jsonify(user=user, token=token), 200
+
+    @app.get("/api/auth/me")
+    @require_auth(strict=True)
+    def get_me():
+        return jsonify(user=g.current_user)
+
+    @app.post("/api/auth/logout")
+    def logout():
+        return jsonify(message="Logged out successfully.")
+
+    # =========================================================================
+    # CONVERSATIONS
+    # =========================================================================
     @app.get("/api/conversations")
     def list_conversations():
-        return jsonify(conversations=conversation_store.list())
+        user = get_current_user_from_request()
+        # For non-guest users, isolate by user_id. For guests, show all unassigned/guest
+        uid = user["id"] if user and not user.get("is_guest") else None
+        return jsonify(conversations=conversation_store.list(user_id=uid))
 
     @app.post("/api/conversations")
     def create_conversation():
@@ -127,18 +228,21 @@ def create_app(config_class=Config, store=None, llm=None):
             return jsonify(error="Rate limit exceeded. Please wait a moment."), 429
         payload = request.get_json(silent=True) or {}
         title = payload.get("title", "New conversation")
-        return jsonify(conversation=conversation_store.create(title=title)), 201
+        uid = get_user_id()
+        return jsonify(conversation=conversation_store.create(title=title, user_id=uid)), 201
 
     @app.get("/api/conversations/<conversation_id>")
     def get_conversation(conversation_id):
-        conversation = conversation_store.get(conversation_id)
+        uid = get_user_id()
+        conversation = conversation_store.get(conversation_id, user_id=uid)
         if not conversation:
             return jsonify(error="Conversation not found."), 404
         return jsonify(conversation=conversation)
 
     @app.delete("/api/conversations/<conversation_id>")
     def delete_conversation(conversation_id):
-        if not conversation_store.delete(conversation_id):
+        uid = get_user_id()
+        if not conversation_store.delete(conversation_id, user_id=uid):
             return jsonify(error="Conversation not found."), 404
         return jsonify(message="Conversation deleted.")
 
@@ -148,11 +252,114 @@ def create_app(config_class=Config, store=None, llm=None):
         title = payload.get("title")
         if not isinstance(title, str) or not title.strip():
             return jsonify(error="A non-empty title string is required."), 400
-        conversation = conversation_store.update_metadata(conversation_id, {"title": title.strip()})
+        uid = get_user_id()
+        conversation = conversation_store.update_metadata(
+            conversation_id, {"title": title.strip()}, user_id=uid
+        )
         if not conversation:
             return jsonify(error="Conversation not found."), 404
         return jsonify(conversation=conversation)
 
+    # =========================================================================
+    # RAG DOCUMENTS
+    # =========================================================================
+    @app.post("/api/documents")
+    def upload_document():
+        client_ip = get_client_ip()
+        if rate_limiter.is_limited(client_ip):
+            return jsonify(error="Rate limit exceeded. Please wait a moment."), 429
+
+        uid = get_user_id()
+
+        if "file" in request.files:
+            uploaded = request.files["file"]
+            if not uploaded.filename:
+                return jsonify(error="No file selected."), 400
+            file_bytes = uploaded.read()
+            filename = uploaded.filename
+        else:
+            payload = request.get_json(silent=True) or {}
+            filename = payload.get("filename")
+            content = payload.get("content")
+            if not filename or content is None:
+                return jsonify(error="File or filename and content is required."), 400
+            if isinstance(content, str):
+                file_bytes = content.encode("utf-8")
+            else:
+                return jsonify(error="Invalid document content payload."), 400
+
+        eff_uid = uid or "default_user"
+        try:
+            doc_record = rag_service.ingest_document(filename=filename, file_bytes=file_bytes, user_id=eff_uid)
+            return jsonify(document=doc_record), 201
+        except Exception as e:
+            logger.error(f"Document ingestion failed: {e}")
+            return jsonify(error=f"Document ingestion failed: {str(e)}"), 400
+
+    @app.get("/api/documents")
+    def list_documents():
+        uid = get_user_id()
+        docs = rag_service.list_documents(user_id=uid or "default_user")
+        return jsonify(documents=docs)
+
+    @app.delete("/api/documents/<document_id>")
+    def delete_document(document_id):
+        uid = get_user_id()
+        deleted = rag_service.delete_document(document_id, user_id=uid or "default_user")
+        if not deleted:
+            return jsonify(error="Document not found or could not be deleted."), 404
+        return jsonify(message="Document deleted successfully.", deleted_chunks=deleted)
+
+    # =========================================================================
+    # PERSISTENT USER MEMORIES
+    # =========================================================================
+    @app.get("/api/memories")
+    def list_memories():
+        uid = get_user_id()
+        cat = request.args.get("category")
+        memories = memory_manager.get_user_memories(user_id=uid or "default_user", category=cat)
+        return jsonify(memories=[m.to_dict() for m in memories])
+
+    @app.post("/api/memories")
+    def create_memory():
+        payload = request.get_json(silent=True) or {}
+        content = payload.get("content")
+        category = payload.get("category", "fact")
+        importance = payload.get("importance", 3)
+
+        if not content or not isinstance(content, str) or not content.strip():
+            return jsonify(error="Content must be a non-empty string."), 400
+
+        uid = get_user_id()
+        item = memory_manager.add_memory(user_id=uid or "default_user", category=category, content=content, importance=importance)
+        return jsonify(memory=item.to_dict()), 201
+
+    @app.patch("/api/memories/<memory_id>")
+    def update_memory(memory_id):
+        payload = request.get_json(silent=True) or {}
+        uid = get_user_id()
+        updated = memory_manager.update_memory(
+            memory_id=memory_id,
+            user_id=uid or "default_user",
+            content=payload.get("content"),
+            category=payload.get("category"),
+            importance=payload.get("importance"),
+        )
+        if not updated:
+            return jsonify(error="Memory not found."), 404
+        return jsonify(memory=updated.to_dict())
+
+    @app.delete("/api/memories/<memory_id>")
+    def delete_memory(memory_id):
+        uid = get_user_id()
+        deleted = memory_manager.delete_memory(memory_id=memory_id, user_id=uid or "default_user")
+        if not deleted:
+            return jsonify(error="Memory not found."), 404
+        return jsonify(message="Memory deleted.")
+
+    # =========================================================================
+    # CHAT (SYNC & STREAMING)
+    # =========================================================================
     @app.post("/api/chat")
     def chat():
         client_ip = get_client_ip()
@@ -166,13 +373,14 @@ def create_app(config_class=Config, store=None, llm=None):
         message = payload.get("message")
         conversation_id = payload.get("conversation_id")
         attachment = payload.get("attachment")
+        mode = payload.get("mode", "chat")
+        uid = get_user_id()
 
         if not isinstance(message, str) or not message.strip():
             return jsonify(error="message must be a non-empty string."), 400
         if len(message) > app.config["MAX_MESSAGE_LENGTH"]:
             return jsonify(error=f"message must be {app.config['MAX_MESSAGE_LENGTH']} characters or fewer."), 400
 
-        # Handle optional text attachment
         formatted_message = message.strip()
         if attachment and isinstance(attachment, dict):
             att_name = str(attachment.get("name", "attachment.txt")).strip()
@@ -183,11 +391,11 @@ def create_app(config_class=Config, store=None, llm=None):
                 formatted_message = f"{formatted_message}\n\n[Attached File: {att_name}]\n```\n{att_content}\n```"
 
         if conversation_id:
-            conversation = conversation_store.get(conversation_id)
+            conversation = conversation_store.get(conversation_id, user_id=uid)
             if not conversation:
                 return jsonify(error="Conversation not found."), 404
         else:
-            conversation = conversation_store.create()
+            conversation = conversation_store.create(user_id=uid)
             conversation_id = conversation["_id"]
 
         timestamp = datetime.now(timezone.utc).isoformat()
@@ -218,19 +426,18 @@ def create_app(config_class=Config, store=None, llm=None):
             "meta": meta,
         }
 
-        # Auto-generate title for the first message
         title = None
         if not conversation.get("messages"):
             title = create_title_from_text(message.strip())
 
         updated = conversation_store.append_messages(
-            conversation_id, [user_message, assistant_message], title=title
+            conversation_id, [user_message, assistant_message], title=title, user_id=uid
         )
         return jsonify(conversation=updated, message=assistant_message, meta=meta)
 
     @app.post("/api/chat/stream")
     def chat_stream():
-        """SSE endpoint for streaming real-time AI responses."""
+        """SSE endpoint for streaming real-time AI responses with agent & document modes."""
         client_ip = get_client_ip()
         if rate_limiter.is_limited(client_ip):
             return jsonify(error="Too many requests. Please wait a moment."), 429
@@ -242,6 +449,8 @@ def create_app(config_class=Config, store=None, llm=None):
         message = payload.get("message")
         conversation_id = payload.get("conversation_id")
         attachment = payload.get("attachment")
+        mode = payload.get("mode", "chat")
+        uid = get_user_id()
 
         if not isinstance(message, str) or not message.strip():
             return jsonify(error="message must be a non-empty string."), 400
@@ -258,11 +467,11 @@ def create_app(config_class=Config, store=None, llm=None):
                 formatted_message = f"{formatted_message}\n\n[Attached File: {att_name}]\n```\n{att_content}\n```"
 
         if conversation_id:
-            conversation = conversation_store.get(conversation_id)
+            conversation = conversation_store.get(conversation_id, user_id=uid)
             if not conversation:
                 return jsonify(error="Conversation not found."), 404
         else:
-            conversation = conversation_store.create()
+            conversation = conversation_store.create(user_id=uid)
             conversation_id = conversation["_id"]
 
         timestamp = datetime.now(timezone.utc).isoformat()
@@ -276,19 +485,47 @@ def create_app(config_class=Config, store=None, llm=None):
         def event_stream():
             accumulated_chunks = []
             final_meta = {}
+            tool_calls_history = []
+            citations = []
             try:
-                if hasattr(llm_service, "generate_stream"):
+                # If agent mode or document mode requested, use orchestrator
+                if mode in ("agent", "document"):
+                    for evt in orchestrator.execute_stream(
+                        context, mode=mode, user_id=uid, conversation_id=conversation_id
+                    ):
+                        evt_type = evt.get("type")
+                        if evt_type == "chunk":
+                            chunk_text = evt.get("content", "")
+                            accumulated_chunks.append(chunk_text)
+                            yield f"data: {json.dumps({'type': 'chunk', 'text': chunk_text, 'content': chunk_text})}\n\n"
+                        elif evt_type in ("tool_call", "tool_result"):
+                            if evt_type == "tool_call":
+                                tool_calls_history.append(evt)
+                            yield f"data: {json.dumps(evt)}\n\n"
+                        elif evt_type == "done":
+                            final_meta = {
+                                "mode": mode,
+                                "steps_taken": evt.get("steps_taken", 1),
+                                "latency_ms": evt.get("latency_ms", 0),
+                                "usage": evt.get("usage", {}),
+                            }
+                            citations = evt.get("citations", [])
+                        elif evt_type == "error":
+                            yield f"data: {json.dumps(evt)}\n\n"
+                            return
+                # Default/Chat mode: preserve compatibility with llm_service.generate_stream
+                elif hasattr(llm_service, "generate_stream"):
                     for event in llm_service.generate_stream(context):
                         if event["type"] == "chunk":
                             accumulated_chunks.append(event["text"])
-                            yield f"data: {json.dumps({'type': 'chunk', 'text': event['text']})}\n\n"
+                            yield f"data: {json.dumps({'type': 'chunk', 'text': event['text'], 'content': event['text']})}\n\n"
                         elif event["type"] == "done":
                             final_meta = event.get("meta", {})
                 else:
                     gen_result = llm_service.generate(context)
                     text = gen_result[0] if isinstance(gen_result, tuple) else gen_result
                     accumulated_chunks.append(text)
-                    yield f"data: {json.dumps({'type': 'chunk', 'text': text})}\n\n"
+                    yield f"data: {json.dumps({'type': 'chunk', 'text': text, 'content': text})}\n\n"
 
                 full_text = "".join(accumulated_chunks)
                 assistant_message = {
@@ -296,15 +533,17 @@ def create_app(config_class=Config, store=None, llm=None):
                     "content": full_text,
                     "created_at": datetime.now(timezone.utc).isoformat(),
                     "meta": final_meta,
+                    "tool_calls": tool_calls_history,
+                    "citations": citations,
                 }
                 title = None
                 if not conversation.get("messages"):
                     title = create_title_from_text(message.strip())
 
                 updated_conv = conversation_store.append_messages(
-                    conversation_id, [user_message, assistant_message], title=title
+                    conversation_id, [user_message, assistant_message], title=title, user_id=uid
                 )
-                yield f"data: {json.dumps({'type': 'done', 'conversation': updated_conv, 'message': assistant_message, 'meta': final_meta})}\n\n"
+                yield f"data: {json.dumps({'type': 'done', 'conversation': updated_conv, 'message': assistant_message, 'meta': final_meta, 'citations': citations})}\n\n"
 
             except Exception as e:
                 app.logger.exception("Streaming failed")

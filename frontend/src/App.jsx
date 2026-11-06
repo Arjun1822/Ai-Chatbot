@@ -30,6 +30,13 @@ import {
   AlertTriangle,
   RefreshCw,
   Cpu,
+  Brain,
+  Activity,
+  User,
+  Wrench,
+  BookOpen,
+  MessageSquare,
+  LogOut,
 } from 'lucide-react'
 
 import {
@@ -38,9 +45,18 @@ import {
   getConversation,
   getConversations,
   getHealth,
+  getMe,
+  logoutUser,
   streamMessage,
   updateConversation,
 } from './services/api'
+
+import { ToolActivityCard } from './components/ToolActivityCard'
+import { CitationPill } from './components/CitationPill'
+import { KnowledgeBaseModal } from './components/KnowledgeBaseModal'
+import { MemoryModal } from './components/MemoryModal'
+import { AuthModal } from './components/AuthModal'
+import { MetricsModal } from './components/MetricsModal'
 
 const suggestions = [
   'Explain quantum computing in simple terms',
@@ -152,12 +168,34 @@ function Message({ message }) {
         <div className="message-meta">
           <strong>{isUser ? 'You' : 'Orbit'}</strong>
           <span>{formatTime(message.created_at)}</span>
-          {!isUser && message.meta?.latency_ms && (
+          {!isUser && message.meta?.mode && (
+            <span className="mode-tag">{message.meta.mode}</span>
+          )}
+          {!isUser && message.meta?.latency_ms ? (
             <span className="latency-tag">
               <Cpu size={11} /> {message.meta.latency_ms}ms
             </span>
-          )}
+          ) : null}
         </div>
+
+        {/* Tool Execution Cards for Agent Mode */}
+        {!isUser && message.tool_calls && message.tool_calls.length > 0 && (
+          <div className="message-tool-calls">
+            {message.tool_calls.map((call, idx) => (
+              <ToolActivityCard
+                key={call.id || idx}
+                toolCall={call}
+                toolResult={{
+                  tool_name: call.tool_name || call.tool,
+                  success: call.success,
+                  output: call.output,
+                  execution_time_ms: call.execution_time_ms,
+                }}
+              />
+            ))}
+          </div>
+        )}
+
         <div className="message-content">
           {isUser ? (
             <div className="user-text-content">
@@ -181,6 +219,19 @@ function Message({ message }) {
             </ReactMarkdown>
           )}
         </div>
+
+        {/* Source Citations for Document Mode */}
+        {!isUser && message.citations && message.citations.length > 0 && (
+          <div className="message-citations">
+            <span className="citations-header">Sources & Citations:</span>
+            <div className="citations-pills-row">
+              {message.citations.map((cite, cIdx) => (
+                <CitationPill key={cite.chunk_id || cIdx} citation={cite} index={cIdx} />
+              ))}
+            </div>
+          </div>
+        )}
+
         {!isUser && (
           <div className="message-actions">
             <button
@@ -205,10 +256,24 @@ function App() {
   const [draft, setDraft] = useState('')
   const [loading, setLoading] = useState(false)
   const [streamingContent, setStreamingContent] = useState('')
+  const [streamingToolCalls, setStreamingToolCalls] = useState([])
+  const [streamingCitations, setStreamingCitations] = useState([])
   const [error, setError] = useState('')
   const [dark, setDark] = useState(() => localStorage.getItem('orbit-theme') === 'dark')
   const [search, setSearch] = useState('')
   const [sidebarOpen, setSidebarOpen] = useState(false)
+
+  // Agent Mode: 'chat' | 'agent' | 'document'
+  const [mode, setMode] = useState('chat')
+
+  // Modals state
+  const [showDocsModal, setShowDocsModal] = useState(false)
+  const [showMemoryModal, setShowMemoryModal] = useState(false)
+  const [showMetricsModal, setShowMetricsModal] = useState(false)
+  const [showAuthModal, setShowAuthModal] = useState(false)
+
+  // Current user state
+  const [currentUser, setCurrentUser] = useState(null)
 
   // Attachment state
   const [attachment, setAttachment] = useState(null)
@@ -227,6 +292,7 @@ function App() {
     database: 'connecting',
     llm: false,
     model: '',
+    tools: 0,
   })
 
   const inputRef = useRef(null)
@@ -241,6 +307,7 @@ function App() {
           database: res.data.database,
           llm: res.data.llm_configured,
           model: res.data.model || 'Gemini',
+          tools: res.data.tools_registered || 5,
         })
       }
     } catch {
@@ -248,12 +315,28 @@ function App() {
     }
   }, [])
 
+  const checkAuth = useCallback(async () => {
+    const token = localStorage.getItem('orbit_token')
+    if (token) {
+      try {
+        const res = await getMe()
+        if (res.data?.user) {
+          setCurrentUser(res.data.user)
+        }
+      } catch {
+        localStorage.removeItem('orbit_token')
+        setCurrentUser(null)
+      }
+    }
+  }, [])
+
   useEffect(() => {
     loadConversations()
     checkHealth()
+    checkAuth()
     const interval = setInterval(checkHealth, 30000)
     return () => clearInterval(interval)
-  }, [checkHealth])
+  }, [checkHealth, checkAuth])
 
   useEffect(() => {
     document.documentElement.dataset.theme = dark ? 'dark' : 'light'
@@ -264,7 +347,7 @@ function App() {
     if (messagesRef.current) {
       messagesRef.current.scrollTop = messagesRef.current.scrollHeight
     }
-  }, [conversation?.messages, streamingContent, loading])
+  }, [conversation?.messages, streamingContent, streamingToolCalls, loading])
 
   async function loadConversations() {
     try {
@@ -341,7 +424,6 @@ function App() {
     const file = e.target.files?.[0]
     if (!file) return
 
-    // 100 KB limit for safe text attachments
     if (file.size > 100 * 1024) {
       setError('File exceeds maximum allowed size (100 KB).')
       if (fileInputRef.current) fileInputRef.current.value = ''
@@ -364,6 +446,15 @@ function App() {
     reader.readAsText(file)
   }
 
+  const handleLogout = async () => {
+    try {
+      await logoutUser()
+    } finally {
+      setCurrentUser(null)
+      loadConversations()
+    }
+  }
+
   async function submit(event) {
     event?.preventDefault()
     if ((!draft.trim() && !attachment) || loading) return
@@ -376,8 +467,9 @@ function App() {
     setError('')
     setLoading(true)
     setStreamingContent('')
+    setStreamingToolCalls([])
+    setStreamingCitations([])
 
-    // Create optimistic user message
     const tempUserMsg = {
       role: 'user',
       content: activeAttachment
@@ -387,7 +479,6 @@ function App() {
       created_at: new Date().toISOString(),
     }
 
-    // Add optimistic user message to conversation
     setConversation((prev) => ({
       _id: prev?._id || 'temp',
       title: prev?.title || messageText.slice(0, 48) || 'New conversation',
@@ -396,32 +487,50 @@ function App() {
 
     let accumulatedText = ''
 
-    await streamMessage(conversation?._id, messageText, activeAttachment, {
-      onChunk: (chunk) => {
-        accumulatedText += chunk
-        setStreamingContent(accumulatedText)
+    await streamMessage(
+      conversation?._id,
+      messageText,
+      activeAttachment,
+      {
+        onChunk: (chunk) => {
+          accumulatedText += chunk
+          setStreamingContent(accumulatedText)
+        },
+        onToolCall: (callData) => {
+          setStreamingToolCalls((prev) => [...prev, callData])
+        },
+        onToolResult: (resData) => {
+          setStreamingToolCalls((prev) =>
+            prev.map((c) => (c.id === resData.id ? { ...c, result: resData } : c))
+          )
+        },
+        onDone: (data) => {
+          setLoading(false)
+          setStreamingContent('')
+          setStreamingToolCalls([])
+          setStreamingCitations([])
+          if (data.conversation) {
+            setConversation(data.conversation)
+            setConversations((items) => [
+              data.conversation,
+              ...items.filter((i) => i._id !== data.conversation._id),
+            ])
+          }
+          inputRef.current?.focus()
+        },
+        onError: (err) => {
+          setLoading(false)
+          setStreamingContent('')
+          setStreamingToolCalls([])
+          setStreamingCitations([])
+          setDraft(messageText)
+          if (activeAttachment) setAttachment(activeAttachment)
+          setError(err.message || 'Something went wrong. Please try again.')
+          inputRef.current?.focus()
+        },
       },
-      onDone: (data) => {
-        setLoading(false)
-        setStreamingContent('')
-        if (data.conversation) {
-          setConversation(data.conversation)
-          setConversations((items) => [
-            data.conversation,
-            ...items.filter((i) => i._id !== data.conversation._id),
-          ])
-        }
-        inputRef.current?.focus()
-      },
-      onError: (err) => {
-        setLoading(false)
-        setStreamingContent('')
-        setDraft(messageText)
-        if (activeAttachment) setAttachment(activeAttachment)
-        setError(err.message || 'Something went wrong. Please try again.')
-        inputRef.current?.focus()
-      },
-    })
+      mode
+    )
   }
 
   const visibleConversations = conversations.filter((item) =>
@@ -471,6 +580,20 @@ function App() {
         </div>
       )}
 
+      {/* Feature Modals */}
+      <KnowledgeBaseModal isOpen={showDocsModal} onClose={() => setShowDocsModal(false)} />
+      <MemoryModal isOpen={showMemoryModal} onClose={() => setShowMemoryModal(false)} />
+      <MetricsModal isOpen={showMetricsModal} onClose={() => setShowMetricsModal(false)} />
+      <AuthModal
+        isOpen={showAuthModal}
+        onClose={() => setShowAuthModal(false)}
+        currentUser={currentUser}
+        onAuthSuccess={(user) => {
+          setCurrentUser(user)
+          loadConversations()
+        }}
+      />
+
       {/* Sidebar */}
       <aside className={`sidebar ${sidebarOpen ? 'is-open' : ''}`} aria-label="Conversation history">
         <div className="sidebar-head">
@@ -500,6 +623,39 @@ function App() {
         >
           <Plus size={18} /> New chat
         </button>
+
+        {/* Platform Tools Navigation */}
+        <div className="sidebar-nav-section">
+          <button
+            type="button"
+            className="sidebar-nav-item"
+            onClick={() => setShowDocsModal(true)}
+            aria-label="Open knowledge base documents"
+          >
+            <BookOpen size={16} />
+            <span>Knowledge Base</span>
+          </button>
+
+          <button
+            type="button"
+            className="sidebar-nav-item"
+            onClick={() => setShowMemoryModal(true)}
+            aria-label="Open persistent memory manager"
+          >
+            <Brain size={16} />
+            <span>AI Memory</span>
+          </button>
+
+          <button
+            type="button"
+            className="sidebar-nav-item"
+            onClick={() => setShowMetricsModal(true)}
+            aria-label="Open platform metrics"
+          >
+            <Activity size={16} />
+            <span>Observability</span>
+          </button>
+        </div>
 
         <div className="history-label">Your conversations</div>
         <input
@@ -581,7 +737,45 @@ function App() {
           )}
         </div>
 
-        <div className="sidebar-foot" title={`Backend: ${healthStatus.online ? 'Online' : 'Offline'} | DB: ${healthStatus.database} | LLM: ${healthStatus.llm ? 'Configured' : 'Missing Key'}`}>
+        {/* User Account Bar */}
+        <div className="sidebar-user-section">
+          {currentUser ? (
+            <div className="user-profile-bar">
+              <div className="user-profile-info">
+                <User size={15} />
+                <span className="user-email" title={currentUser.email}>
+                  {currentUser.name || currentUser.email}
+                </span>
+              </div>
+              <button
+                type="button"
+                className="action-icon-btn"
+                onClick={handleLogout}
+                title="Log out"
+                aria-label="Log out"
+              >
+                <LogOut size={14} />
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              className="btn-auth-prompt"
+              onClick={() => setShowAuthModal(true)}
+              aria-label="Sign in or register"
+            >
+              <User size={15} />
+              <span>Sign In / Register</span>
+            </button>
+          )}
+        </div>
+
+        <div
+          className="sidebar-foot"
+          title={`Backend: ${healthStatus.online ? 'Online' : 'Offline'} | DB: ${healthStatus.database} | LLM: ${
+            healthStatus.llm ? 'Configured' : 'Missing Key'
+          }`}
+        >
           <span
             className={`status-dot ${
               !healthStatus.online
@@ -602,7 +796,7 @@ function App() {
             </span>
             <span className="status-sub">
               {healthStatus.online
-                ? `${healthStatus.model || 'Gemini'} • Ready`
+                ? `${healthStatus.model || 'Gemini'} • ${healthStatus.tools} Tools`
                 : 'Check Flask Backend'}
             </span>
           </div>
@@ -626,15 +820,35 @@ function App() {
               <h1>{conversation?.title || 'A quiet place to think'}</h1>
             </div>
           </div>
-          <button
-            type="button"
-            className="icon-button"
-            onClick={() => setDark(!dark)}
-            aria-label={dark ? 'Switch to light mode' : 'Switch to dark mode'}
-            title={dark ? 'Use light theme' : 'Use dark theme'}
-          >
-            {dark ? <Sun size={19} /> : <Moon size={19} />}
-          </button>
+          <div className="topbar-actions">
+            <button
+              type="button"
+              className="topbar-tool-btn"
+              onClick={() => setShowDocsModal(true)}
+              title="Knowledge Documents"
+            >
+              <BookOpen size={16} />
+              <span className="desktop-only">Docs</span>
+            </button>
+            <button
+              type="button"
+              className="topbar-tool-btn"
+              onClick={() => setShowMemoryModal(true)}
+              title="Persistent Memory"
+            >
+              <Brain size={16} />
+              <span className="desktop-only">Memory</span>
+            </button>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={() => setDark(!dark)}
+              aria-label={dark ? 'Switch to light mode' : 'Switch to dark mode'}
+              title={dark ? 'Use light theme' : 'Use dark theme'}
+            >
+              {dark ? <Sun size={19} /> : <Moon size={19} />}
+            </button>
+          </div>
         </header>
 
         {/* Conversation Area */}
@@ -665,7 +879,9 @@ function App() {
                     }}
                   >
                     <span>{item}</span>
-                    <span className="arrow" aria-hidden="true">↗</span>
+                    <span className="arrow" aria-hidden="true">
+                      ↗
+                    </span>
                   </button>
                 ))}
               </div>
@@ -676,6 +892,19 @@ function App() {
                 <Message message={message} key={`${message.role}-${index}`} />
               ))}
 
+              {/* Streaming Live Tool Execution Indicator */}
+              {streamingToolCalls && streamingToolCalls.length > 0 && (
+                <div className="streaming-tool-activity-wrap">
+                  {streamingToolCalls.map((call, idx) => (
+                    <ToolActivityCard
+                      key={call.id || idx}
+                      toolCall={call}
+                      toolResult={call.result}
+                    />
+                  ))}
+                </div>
+              )}
+
               {/* Streaming AI Chunk Output */}
               {streamingContent && (
                 <article className="message-row ai-row" aria-label="Assistant streaming response">
@@ -685,7 +914,7 @@ function App() {
                   <div className="message-body">
                     <div className="message-meta">
                       <strong>Orbit</strong>
-                      <span>generating...</span>
+                      <span>generating in {mode} mode...</span>
                     </div>
                     <div className="message-content">
                       <ReactMarkdown
@@ -703,7 +932,7 @@ function App() {
               )}
 
               {/* Typing indicator when waiting for stream start */}
-              {loading && !streamingContent && (
+              {loading && !streamingContent && streamingToolCalls.length === 0 && (
                 <div className="message-row ai-row" aria-live="polite">
                   <div className="avatar ai-avatar" aria-hidden="true">
                     <Bot size={17} />
@@ -740,6 +969,43 @@ function App() {
 
         {/* Input Composer */}
         <div className="composer-wrap">
+          {/* Agent Mode Selector Bar */}
+          <div className="mode-selector-bar" role="tablist" aria-label="Agent execution mode">
+            <button
+              type="button"
+              className={`mode-btn ${mode === 'chat' ? 'active' : ''}`}
+              onClick={() => setMode('chat')}
+              role="tab"
+              aria-selected={mode === 'chat'}
+              title="Direct conversational response"
+            >
+              <MessageSquare size={13} />
+              <span>Chat</span>
+            </button>
+            <button
+              type="button"
+              className={`mode-btn ${mode === 'agent' ? 'active' : ''}`}
+              onClick={() => setMode('agent')}
+              role="tab"
+              aria-selected={mode === 'agent'}
+              title="Autonomous multi-step reasoning with tools"
+            >
+              <Cpu size={13} />
+              <span>Agent Tools</span>
+            </button>
+            <button
+              type="button"
+              className={`mode-btn ${mode === 'document' ? 'active' : ''}`}
+              onClick={() => setMode('document')}
+              role="tab"
+              aria-selected={mode === 'document'}
+              title="Search knowledge base documents with citations"
+            >
+              <BookOpen size={13} />
+              <span>Document RAG</span>
+            </button>
+          </div>
+
           {/* File Attachment Pill */}
           {attachment && (
             <div className="attachment-chip">
@@ -788,7 +1054,13 @@ function App() {
                   submit(event)
                 }
               }}
-              placeholder="Message Orbit... (Enter to send, Shift+Enter for new line)"
+              placeholder={
+                mode === 'agent'
+                  ? 'Ask a multi-step question (e.g. math calculation, weather, time)...'
+                  : mode === 'document'
+                  ? 'Ask questions based on your indexed knowledge base documents...'
+                  : 'Message Orbit... (Enter to send, Shift+Enter for new line)'
+              }
               rows={1}
               aria-label="Chat input message"
             />
@@ -803,7 +1075,9 @@ function App() {
             </button>
           </form>
 
-          <p className="composer-hint">Orbit can make mistakes. Verify important information.</p>
+          <p className="composer-hint">
+            Mode: <strong>{mode.toUpperCase()}</strong>. Orbit evaluates tools and retrieves knowledge to verify facts.
+          </p>
         </div>
       </main>
     </div>
