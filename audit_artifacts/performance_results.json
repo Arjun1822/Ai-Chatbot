@@ -1,0 +1,41 @@
+{
+  "local_storage": {
+    "mode": "in-memory (fallback)",
+    "average_create_latency_ms": 0.255,
+    "average_read_latency_ms": 0.285,
+    "list_latency_ms": 1.265,
+    "sample_size": 50
+  },
+  "gemini_api_streaming": {
+    "samples": [
+      {
+        "prompt": "Explain what an API is in 20 words.",
+        "ttft_ms": 907.35,
+        "total_time_ms": 988.84,
+        "chunks": 3,
+        "chars": 109
+      },
+      {
+        "prompt": "Give 3 tips for writing clean code.",
+        "ttft_ms": 740.16,
+        "total_time_ms": 1433.45,
+        "chunks": 10,
+        "chars": 882
+      },
+      {
+        "prompt": "What is the speed of light in vacuum?",
+        "ttft_ms": 850.36,
+        "total_time_ms": 1124.95,
+        "chunks": 6,
+        "chars": 389
+      }
+    ],
+    "average_ttft_ms": 832.62,
+    "average_total_duration_ms": 1182.41,
+    "network_overhead_note": "TTFT represents network roundtrip latency to Google Gemini endpoint + model prefill time."
+  },
+  "system_resources": {
+    "process_working_set_mb": 35.0,
+    "runtime": "Python 3.12 (win32)"
+  }
+}

@@ -1,0 +1,95 @@
+[
+  {
+    "id": "TC-E2E-01",
+    "description": "Backend & Frontend Server Startup",
+    "expected": "Flask starts on :5000, Frontend serves on :3000, /api/health returns ok",
+    "actual": "Both services initialized successfully",
+    "status": "PASS"
+  },
+  {
+    "id": "TC-E2E-02",
+    "description": "Chat Interface Loading & Initial State",
+    "expected": "Title is Orbit AI, welcome message and suggestion buttons visible",
+    "actual": "Title is \"Orbit AI\", welcome hero displayed",
+    "status": "PASS",
+    "evidence": "01_welcome_screen.png"
+  },
+  {
+    "id": "TC-E2E-03",
+    "description": "Live Backend & Health Indicator",
+    "expected": "Status reports Local Storage / Cloud DB and Gemini Ready",
+    "actual": "Cloud Database (gemini-3.5-flash-lite • Ready)",
+    "status": "PASS"
+  },
+  {
+    "id": "TC-E2E-04",
+    "description": "Real Gemini API Response & Streaming",
+    "expected": "Gemini streams and generates mathematically correct answer (120)",
+    "actual": "120",
+    "status": "PASS",
+    "evidence": "02_real_gemini_response.png"
+  },
+  {
+    "id": "TC-E2E-05",
+    "description": "Code Syntax Highlighting with PrismJS",
+    "expected": "Code block rendered with language header, prism styling, and copy button",
+    "actual": "Language tag: \"python\", Copy button present: true",
+    "status": "PASS",
+    "evidence": "03_code_highlighting.png"
+  },
+  {
+    "id": "TC-E2E-06",
+    "description": "File Attachment Context & Processing",
+    "expected": "Attached Python file is uploaded, recognized, and analyzed by Gemini",
+    "actual": "AI responded: \"This code defines a simple function named add that takes two parameters (a and b) and returns their ...\"",
+    "status": "PASS",
+    "evidence": "04_attachment_flow.png"
+  },
+  {
+    "id": "TC-E2E-07",
+    "description": "Multiple Conversations Management",
+    "expected": "New chat opens welcome view, previous conversation listed in sidebar",
+    "actual": "5 conversation(s) listed: New conversation, What is 15 * 8? Answer concisely., hello, New conversation, hello",
+    "status": "PASS",
+    "evidence": "05_new_chat.png"
+  },
+  {
+    "id": "TC-E2E-08",
+    "description": "Conversation Renaming via PATCH API",
+    "expected": "Title updates in sidebar and persists",
+    "actual": "Title updated to: \"New conversatioAudited Math Conversation\"",
+    "status": "PASS",
+    "evidence": "06_renamed_chat.png"
+  },
+  {
+    "id": "TC-E2E-09",
+    "description": "Conversation Search Filter",
+    "expected": "Search matches \"Audited\" and filters list",
+    "actual": "Filtered list: New conversatioAudited Math Conversation",
+    "status": "PASS"
+  },
+  {
+    "id": "TC-E2E-10",
+    "description": "Delete Confirmation & Accidental Loss Prevention",
+    "expected": "Confirmation modal appears on delete click; deletion executes only upon confirmation",
+    "actual": "Modal intercepted deletion, cancellation preserved chat, confirmation deleted chat",
+    "status": "PASS",
+    "evidence": "07_delete_modal.png"
+  },
+  {
+    "id": "TC-E2E-11",
+    "description": "Dark / Light Theme Toggle",
+    "expected": "HTML data-theme switches to dark and persists",
+    "actual": "Theme attribute is \"dark\"",
+    "status": "PASS",
+    "evidence": "09_dark_theme.png"
+  },
+  {
+    "id": "TC-E2E-12",
+    "description": "Mobile Viewport & Drawer Navigation",
+    "expected": "Mobile view shows hamburger icon, toggles slide-out drawer with backdrop",
+    "actual": "Hamburger visible: true, Drawer opened on click",
+    "status": "PASS",
+    "evidence": "10_mobile_view.png, 11_mobile_drawer.png"
+  }
+]

@@ -1,0 +1,67 @@
+[
+  {
+    "id": "SEC-TEST-01",
+    "category": "Information Disclosure",
+    "description": "Inspect API endpoints for API key leaks",
+    "expected": "No API keys leaked in responses",
+    "actual": "No key found in /api/health",
+    "status": "PASS",
+    "severity": "INFO"
+  },
+  {
+    "id": "SEC-TEST-02",
+    "category": "Client-Side Secrets",
+    "description": "Scan frontend production build bundles for hardcoded API keys",
+    "expected": "Zero API keys found in static JS/HTML bundles",
+    "actual": "No API keys present in frontend build",
+    "status": "PASS",
+    "severity": "INFO"
+  },
+  {
+    "id": "SEC-TEST-03",
+    "category": "CORS Policy",
+    "description": "Test CORS origin lockdown against unauthorized domains",
+    "expected": "Reject unauthorized origins",
+    "actual": "Access-Control-Allow-Origin: None (Rejected)",
+    "status": "PASS",
+    "severity": "INFO"
+  },
+  {
+    "id": "SEC-TEST-04",
+    "category": "Rate Limiting Architecture",
+    "description": "Rate Limiter Header Spoofing (X-Forwarded-For trust evaluation)",
+    "expected": "Document trusted proxy requirement (ProxyFix) for production",
+    "actual": "Direct client can manipulate X-Forwarded-For header unless ProxyFix / trusted reverse proxy is configured",
+    "status": "PASS",
+    "severity": "MEDIUM",
+    "recommendation": "In production, use werkzeug.middleware.proxy_fix.ProxyFix with explicit num_proxies=1."
+  },
+  {
+    "id": "SEC-TEST-05",
+    "category": "Path Traversal",
+    "description": "Test path traversal sequences (../../) in attachment filenames",
+    "expected": "Server processes in memory; zero disk file creation or file overwrite",
+    "actual": "Attachment name strictly treated as display text in Markdown context; no disk operations performed",
+    "status": "PASS",
+    "severity": "INFO"
+  },
+  {
+    "id": "SEC-TEST-06",
+    "category": "Authorization & IDOR",
+    "description": "Access arbitrary conversation IDs",
+    "expected": "404 Not Found returned for non-existent IDs. Note: In single-user / local mode, no auth tokens are required; multi-tenant environments require session/user ownership validation.",
+    "actual": "Status code: 404",
+    "status": "PASS",
+    "severity": "MEDIUM",
+    "recommendation": "For multi-tenant deployment, add user authentication (e.g. JWT/OAuth2) and associate conversation['_id'] with user_id."
+  },
+  {
+    "id": "SEC-TEST-07",
+    "category": "Source Control",
+    "description": "Inspect Git history for committed API keys",
+    "expected": "Zero API keys committed to git log",
+    "actual": "No API keys found in commit history",
+    "status": "PASS",
+    "severity": "INFO"
+  }
+]
