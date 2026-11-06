@@ -104,3 +104,4 @@ docker compose down
 # Stop and purge volumes (caution: deletes persistent data)
 docker compose down -v
 ```
+

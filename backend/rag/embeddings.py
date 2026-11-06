@@ -92,3 +92,4 @@ class EmbeddingService:
         if norm <= 1e-9:
             return vec
         return [v / norm for v in vec]
+

@@ -143,3 +143,4 @@ def require_auth(strict: bool = False):
             return fn(*args, **kwargs)
         return wrapper
     return decorator
+

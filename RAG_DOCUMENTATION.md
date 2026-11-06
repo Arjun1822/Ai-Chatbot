@@ -94,3 +94,4 @@ When an answer is synthesized in `document` mode:
    }
    ```
 4. The React client renders interactive citation badges under the assistant response, allowing the user to click and inspect the underlying text chunk.
+

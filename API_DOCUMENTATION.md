@@ -209,3 +209,4 @@ All error responses adhere to a standardized JSON schema:
 | `429 Too Many Requests` | Request rate limit exceeded. |
 | `502 Bad Gateway` | Upstream Gemini API unreachable. |
 | `503 Service Unavailable` | LLM service unconfigured (missing `GEMINI_API_KEY`). |
+

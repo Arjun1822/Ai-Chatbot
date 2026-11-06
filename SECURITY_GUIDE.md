@@ -79,3 +79,4 @@ ORBIT AI enforces a defense-in-depth security model across the presentation laye
   1. **Sliding-Window Rate Limiter**: Implemented with thread-safe locks and automatic cleanup of inactive IP stamps to avoid memory leaks.
   2. **Bounded In-Memory Fallback**: When running without MongoDB, `ConversationStore` caps stored in-memory conversations at 1,000 items, evicting the oldest updated threads.
   3. **Strict Size Limits**: 8,000 characters per message, 100 KB per text attachment, and 10 MB per knowledge document upload.
+

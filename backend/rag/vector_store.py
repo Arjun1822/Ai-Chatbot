@@ -286,3 +286,4 @@ class MongoAtlasVectorStore(BaseVectorStore):
 
     def list_documents(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         return self._fallback.list_documents(user_id)
+

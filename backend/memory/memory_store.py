@@ -152,3 +152,4 @@ class MemoryStore:
                 self._memories = {mid: MemoryItem.from_dict(v) for mid, v in data.items()}
         except Exception as e:
             logger.warning(f"Failed to load memories from {self.persistence_path}: {e}")
+

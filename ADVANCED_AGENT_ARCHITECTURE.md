@@ -92,3 +92,4 @@ Communication between the Orchestrator and the frontend chat client uses Server-
 2. **Deterministic Fallbacks**:
    - If internet connectivity is interrupted during web search or weather lookup, the tool returns a graceful descriptive error enabling the LLM to explain the situation to the user without crashing.
    - If the Gemini embedding API is unreachable or unconfigured, the system automatically switches to deterministic local L2-normalized dense embeddings.
+

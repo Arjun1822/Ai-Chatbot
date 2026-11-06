@@ -72,3 +72,4 @@ Users retain full control to view, add, edit, or delete stored memories at any t
 - `POST /api/memories`: Explicitly save a new preference or fact.
 - `PATCH /api/memories/<id>`: Update content, priority, or category.
 - `DELETE /api/memories/<id>`: Permanently remove a memory item.
+

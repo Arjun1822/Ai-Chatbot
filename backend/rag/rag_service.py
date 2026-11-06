@@ -117,3 +117,4 @@ class RAGService:
 
     def list_documents(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         return self.vector_store.list_documents(user_id=user_id)
+

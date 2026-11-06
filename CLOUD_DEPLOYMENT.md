@@ -98,3 +98,4 @@ To leverage managed Atlas Vector Search:
 - [x] CORS restricted to verified frontend domains.
 - [x] Automatic container autoscaling with min-instance = 1 to eliminate cold starts.
 - [x] In-flight DDoS protection via Cloud Armor or Cloudflare WAF.
+

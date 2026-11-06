@@ -72,3 +72,4 @@ registry.register(
 2. **Execution Timeout**: Tools are executed with an active timer (default 5.0s). If an external API hangs, the manager interrupts execution and reports a timeout.
 3. **Loop Detection**: If an LLM attempts to execute the same tool with identical arguments repeatedly, the execution manager blocks subsequent calls with `"Loop detected"`.
 4. **Audit Logging**: Structured metrics (tool name, execution time ms, success/error status) are recorded in `ToolExecutionManager._execution_history` without storing sensitive customer payload data.
+
