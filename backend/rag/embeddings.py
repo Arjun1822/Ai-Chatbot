@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 class EmbeddingService:
     """Embedding service generating vector embeddings using Google GenAI or local fallback."""
 
-    EMBEDDING_MODEL = "text-embedding-004"
+    EMBEDDING_MODEL = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001")
     FALLBACK_DIMENSION = 256
 
     def __init__(self, api_key: Optional[str] = None):

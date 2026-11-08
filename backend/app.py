@@ -13,8 +13,10 @@ from flask_cors import CORS
 
 from agent.orchestrator import AgentOrchestrator
 from config import Config
+from database import DatabaseManager
 from memory.memory_manager import MemoryManager
 from rag.rag_service import RAGService
+from rag.vector_store import MongoAtlasVectorStore
 from services.auth_service import auth_service, get_current_user_from_request, require_auth
 from services.conversation_store import ConversationStore
 from services.llm_service import LLMService
@@ -68,22 +70,75 @@ def create_app(config_class=Config, store=None, llm=None, user_st=None, rag_svc=
     app.config.from_object(config_class)
     app.config["MAX_CONTENT_LENGTH"] = getattr(config_class, "MAX_CONTENT_LENGTH", 512 * 1024)
 
-    allowed_origins = getattr(config_class, "FRONTEND_URLS", [app.config.get("FRONTEND_URL", "http://localhost:3000")])
+    if hasattr(config_class, "get_allowed_origins"):
+        allowed_origins = config_class.get_allowed_origins()
+    else:
+        allowed_origins = getattr(config_class, "FRONTEND_URLS", [app.config.get("FRONTEND_URL", "http://localhost:3000")])
     CORS(
         app,
-        resources={r"/api/*": {"origins": allowed_origins}},
-        supports_credentials=True,
-        expose_headers=["Content-Type", "Authorization"],
+        resources={
+            r"/api/*": {
+                "origins": allowed_origins,
+                "methods": ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+                "allow_headers": ["Content-Type", "Authorization", "X-Requested-With", "Accept"],
+                "expose_headers": ["Content-Type", "Authorization"],
+            }
+        },
+        supports_credentials=False,
     )
 
     data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
     os.makedirs(data_dir, exist_ok=True)
 
-    conversation_store = store or ConversationStore(config_class)
+    # Centralized MongoDB / Atlas connection
+    mongodb_uri = getattr(config_class, "MONGODB_URI", "")
+    database_name = getattr(config_class, "DATABASE_NAME", "orbit_ai")
+    flask_env = getattr(config_class, "FLASK_ENV", "development")
+    db_manager = DatabaseManager.get_instance(uri=mongodb_uri, db_name=database_name)
+    db_client = db_manager.client
+
+    # Validate startup configuration
+    if hasattr(config_class, "validate_configuration"):
+        config_class.validate_configuration()
+
+    # Production Failure Safety: Never silently fall back to volatile storage in production
+    allow_fallback = os.getenv("ALLOW_EPHEMERAL_STORAGE", "false").lower() == "true"
+    if flask_env == "production" and not allow_fallback:
+        secret_key = app.config.get("SECRET_KEY", "")
+        if not secret_key or secret_key == "dev-only-change-me" or len(secret_key) < 32:
+            raise RuntimeError(
+                "CRITICAL: Insecure, default, or weak SECRET_KEY detected in production. "
+                "Set a secure, random 32+ character SECRET_KEY environment variable to protect JWT tokens."
+            )
+        if not mongodb_uri:
+            raise RuntimeError(
+                "CRITICAL: MONGODB_URI is not configured in production environment. "
+                "Halting startup to prevent data loss. Supply a valid MongoDB Atlas connection string."
+            )
+        if not db_manager.is_connected:
+            raise RuntimeError(
+                f"CRITICAL: Production startup failed to connect to MongoDB cluster ({db_manager.masked_uri}). "
+                f"Reason: {db_manager._last_error}. Halting startup to prevent silent fallback to volatile storage."
+            )
+
+    conversation_store = store or ConversationStore(config_class, mongo_client=db_client, db_name=database_name)
     llm_service = llm or LLMService(config_class)
-    user_store = user_st or UserStore(persistence_path=os.path.join(data_dir, "users.json"))
-    rag_service = rag_svc or RAGService(data_dir=data_dir)
-    memory_manager = mem_mgr or MemoryManager(data_dir=data_dir)
+    user_store = user_st or UserStore(
+        persistence_path=os.path.join(data_dir, "users.json"),
+        mongo_client=db_client,
+        db_name=database_name,
+    )
+    vector_store = (
+        MongoAtlasVectorStore(mongo_client=db_client, db_name=database_name)
+        if db_client is not None
+        else None
+    )
+    rag_service = rag_svc or RAGService(vector_store=vector_store, data_dir=data_dir)
+    memory_manager = mem_mgr or MemoryManager(
+        data_dir=data_dir,
+        mongo_client=db_client,
+        db_name=database_name,
+    )
 
     orchestrator = AgentOrchestrator(
         llm_service=llm_service,
@@ -145,13 +200,24 @@ def create_app(config_class=Config, store=None, llm=None, user_st=None, rag_svc=
     # =========================================================================
     @app.get("/api/health")
     def health():
+        db_ping = db_manager.ping()
+        db_connected = db_ping.get("connected", False)
         return jsonify(
             status="ok",
-            database="connected" if conversation_store.health() else "in-memory",
+            database="connected" if db_connected else ("unconfigured" if db_ping.get("status") == "unconfigured" else "in-memory"),
+            database_type="atlas" if db_ping.get("is_atlas") else ("mongodb" if db_connected else "in-memory"),
+            database_name=database_name,
             llm_configured=llm_service.configured,
             model=getattr(llm_service, "model", "default"),
             tools_registered=len(orchestrator.tool_registry.list_tools()),
         )
+
+    @app.get("/api/health/db")
+    def health_db():
+        """Dedicated database diagnostics endpoint."""
+        ping_res = db_manager.ping()
+        status_code = 200 if ping_res.get("connected") or ping_res.get("status") == "unconfigured" else 503
+        return jsonify(ping_res), status_code
 
     @app.get("/api/admin/metrics")
     def get_metrics():
@@ -549,7 +615,11 @@ def create_app(config_class=Config, store=None, llm=None, user_st=None, rag_svc=
                 app.logger.exception("Streaming failed")
                 yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
 
-        return Response(stream_with_context(event_stream()), mimetype="text/event-stream")
+        response = Response(stream_with_context(event_stream()), mimetype="text/event-stream")
+        response.headers["Cache-Control"] = "no-cache, no-transform"
+        response.headers["X-Accel-Buffering"] = "no"
+        response.headers["Connection"] = "keep-alive"
+        return response
 
     return app
 

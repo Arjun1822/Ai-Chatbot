@@ -1,6 +1,9 @@
 import axios from 'axios'
 
-const BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000/api'
+// Resolve backend API URL (supports with or without trailing /api)
+const rawApiUrl = (process.env.REACT_APP_API_URL || 'http://localhost:5000').trim()
+const cleanUrl = rawApiUrl.replace(/\/+$/, '')
+const BASE_URL = cleanUrl.endsWith('/api') ? cleanUrl : `${cleanUrl}/api`
 
 const api = axios.create({
   baseURL: BASE_URL,
@@ -52,9 +55,7 @@ export const listDocuments = () => api.get('/documents')
 export const uploadDocument = (file) => {
   const formData = new FormData()
   formData.append('file', file)
-  return api.post('/documents', formData, {
-    headers: { 'Content-Type': 'multipart/form-data' },
-  })
+  return api.post('/documents', formData)
 }
 export const deleteDocument = (id) => api.delete(`/documents/${id}`)
 

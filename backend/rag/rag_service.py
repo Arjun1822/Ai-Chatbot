@@ -72,6 +72,7 @@ class RAGService:
         top_k: int = 4,
         score_threshold: float = 0.0,
         user_id: Optional[str] = None,
+        document_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Retrieve most relevant document chunks and assemble formatted context and citations."""
         if not query or not query.strip():
@@ -83,6 +84,7 @@ class RAGService:
             top_k=top_k,
             score_threshold=score_threshold,
             user_id=user_id,
+            document_id=document_id,
         )
 
         if not results:
@@ -117,4 +119,22 @@ class RAGService:
 
     def list_documents(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         return self.vector_store.list_documents(user_id=user_id)
+
+    def search(
+        self,
+        query: str,
+        top_k: int = 4,
+        score_threshold: float = 0.0,
+        user_id: Optional[str] = None,
+        document_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Convenience search alias returning structured citation list."""
+        res = self.query_documents(
+            query=query,
+            top_k=top_k,
+            score_threshold=score_threshold,
+            user_id=user_id,
+            document_id=document_id,
+        )
+        return res.get("citations", [])
 

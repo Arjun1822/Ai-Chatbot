@@ -27,18 +27,28 @@ def serialize(conversation):
 class ConversationStore:
     MAX_IN_MEMORY_CONVERSATIONS = 1000
 
-    def __init__(self, config):
+    def __init__(self, config, mongo_client=None, db_name=None):
         self.collection = None
         self._items = {}
         self._lock = RLock()
-        if getattr(config, "MONGODB_URI", ""):
+
+        target_db = db_name or getattr(config, "DATABASE_NAME", "orbit_ai")
+        client = mongo_client
+
+        if client is None and getattr(config, "MONGODB_URI", ""):
             try:
-                from pymongo import MongoClient
-                client = MongoClient(config.MONGODB_URI, serverSelectionTimeoutMS=1500)
-                client.admin.command("ping")
-                self.collection = client[config.DATABASE_NAME].conversations
+                from database import DatabaseManager
+                mgr = DatabaseManager.get_instance(config.MONGODB_URI, target_db)
+                client = mgr.client
+            except Exception:
+                client = None
+
+        if client is not None:
+            try:
+                self.collection = client[target_db].conversations
                 self.collection.create_index("updated_at")
                 self.collection.create_index("user_id")
+                self.collection.create_index([("user_id", 1), ("updated_at", -1)])
             except Exception:
                 self.collection = None
 
@@ -50,7 +60,7 @@ class ConversationStore:
         if self.collection is None:
             return False
         try:
-            self.collection.database.client.admin.command("ping")
+            self.collection.database.command("ping")
             return True
         except Exception:
             return False

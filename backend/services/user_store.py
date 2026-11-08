@@ -29,11 +29,11 @@ def verify_password(password: str, salt_hex: str, password_hash: str) -> bool:
 class UserStore:
     """User store supporting secure PBKDF2 password hashing, JSON persistence, and MongoDB."""
 
-    def __init__(self, persistence_path: Optional[str] = None, mongo_client=None, db_name="orbit_db"):
+    def __init__(self, persistence_path: Optional[str] = None, mongo_client=None, db_name="orbit_ai"):
         self._lock = RLock()
         self.persistence_path = persistence_path
         self.mongo_client = mongo_client
-        self.db_name = db_name
+        self.db_name = db_name or "orbit_ai"
         self._users: Dict[str, Dict[str, Any]] = {}  # user_id -> user_dict
         self._email_index: Dict[str, str] = {}  # lower_email -> user_id
 
@@ -54,6 +54,16 @@ class UserStore:
 
         if not password or len(password) < 8:
             raise ValueError("Password must be at least 8 characters long.")
+
+        if self.mongo_client:
+            try:
+                col = self.mongo_client[self.db_name]["users"]
+                if col.find_one({"email": clean_email}):
+                    raise ValueError("User with this email already exists.")
+            except ValueError:
+                raise
+            except Exception:
+                pass
 
         with self._lock:
             if clean_email in self._email_index:
@@ -84,6 +94,8 @@ class UserStore:
                 col = self.mongo_client[self.db_name]["users"]
                 col.insert_one(user_doc)
             except Exception as e:
+                if "duplicate" in str(e).lower() or getattr(e, "code", None) == 11000:
+                    raise ValueError("User with this email already exists.")
                 logger.warning(f"MongoDB create_user failed: {e}")
 
         return self._sanitize(user_doc)
@@ -128,6 +140,15 @@ class UserStore:
 
     def get_by_email(self, email: str) -> Optional[Dict[str, Any]]:
         clean_email = email.strip().lower()
+        if self.mongo_client:
+            try:
+                col = self.mongo_client[self.db_name]["users"]
+                doc = col.find_one({"email": clean_email})
+                if doc:
+                    return self._sanitize(doc)
+            except Exception:
+                pass
+
         with self._lock:
             uid = self._email_index.get(clean_email)
             if uid:

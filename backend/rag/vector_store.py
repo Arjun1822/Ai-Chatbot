@@ -39,6 +39,7 @@ class BaseVectorStore(ABC):
         top_k: int = 4,
         score_threshold: float = 0.0,
         user_id: Optional[str] = None,
+        document_id: Optional[str] = None,
     ) -> List[SearchResult]:
         pass
 
@@ -105,12 +106,15 @@ class LocalVectorStore(BaseVectorStore):
         top_k: int = 4,
         score_threshold: float = 0.0,
         user_id: Optional[str] = None,
+        document_id: Optional[str] = None,
     ) -> List[SearchResult]:
         with self._lock:
             scored_results: List[SearchResult] = []
             for item in self._items.values():
                 # Isolation check
                 if user_id and item.get("user_id") != user_id:
+                    continue
+                if document_id and item.get("document_id") != document_id:
                     continue
 
                 emb = item["embedding"]
@@ -187,9 +191,9 @@ class LocalVectorStore(BaseVectorStore):
 class MongoAtlasVectorStore(BaseVectorStore):
     """MongoDB Atlas Vector Store implementation with fallback to LocalVectorStore."""
 
-    def __init__(self, mongo_client=None, db_name="orbit_db", collection_name="vector_embeddings"):
+    def __init__(self, mongo_client=None, db_name="orbit_ai", collection_name="vector_embeddings"):
         self.mongo_client = mongo_client
-        self.db_name = db_name
+        self.db_name = db_name or "orbit_ai"
         self.collection_name = collection_name
         self._fallback = LocalVectorStore()
 
@@ -199,6 +203,7 @@ class MongoAtlasVectorStore(BaseVectorStore):
         embeddings: List[List[float]],
         user_id: str = "default_user",
     ) -> None:
+        self._fallback.add_chunks(chunks, embeddings, user_id=user_id)
         if self.mongo_client:
             try:
                 col = self.mongo_client[self.db_name][self.collection_name]
@@ -215,10 +220,8 @@ class MongoAtlasVectorStore(BaseVectorStore):
                     })
                 if docs:
                     col.insert_many(docs, ordered=False)
-                return
             except Exception as e:
-                logger.warning(f"MongoDB Atlas vector insert failed ({e}); falling back to local store.")
-        self._fallback.add_chunks(chunks, embeddings, user_id=user_id)
+                logger.warning(f"MongoDB Atlas vector insert failed ({e}); local store active.")
 
     def search(
         self,
@@ -226,21 +229,34 @@ class MongoAtlasVectorStore(BaseVectorStore):
         top_k: int = 4,
         score_threshold: float = 0.0,
         user_id: Optional[str] = None,
+        document_id: Optional[str] = None,
     ) -> List[SearchResult]:
         if self.mongo_client:
             try:
                 col = self.mongo_client[self.db_name][self.collection_name]
+                vector_search_stage: Dict[str, Any] = {
+                    "index": "vector_index",
+                    "path": "embedding",
+                    "queryVector": query_embedding,
+                    "numCandidates": max(top_k * 10, 20),
+                    "limit": top_k,
+                }
+
+                # Build filter if user_id or document_id is supplied
+                filter_doc: Dict[str, Any] = {}
+                if user_id:
+                    filter_doc["user_id"] = user_id
+                if document_id:
+                    filter_doc["document_id"] = document_id
+
+                if filter_doc:
+                    if len(filter_doc) == 1:
+                        vector_search_stage["filter"] = filter_doc
+                    else:
+                        vector_search_stage["filter"] = {"$and": [{k: v} for k, v in filter_doc.items()]}
+
                 pipeline = [
-                    {
-                        "$vectorSearch": {
-                            "index": "vector_index",
-                            "path": "embedding",
-                            "queryVector": query_embedding,
-                            "numCandidates": top_k * 10,
-                            "limit": top_k,
-                            "filter": {"user_id": user_id} if user_id else {},
-                        }
-                    },
+                    {"$vectorSearch": vector_search_stage},
                     {
                         "$project": {
                             "_id": 1,
@@ -266,10 +282,11 @@ class MongoAtlasVectorStore(BaseVectorStore):
                                 metadata=doc.get("metadata", {}),
                             )
                         )
-                return results
+                if results:
+                    return results
             except Exception as e:
                 logger.warning(f"MongoDB Atlas vector search failed ({e}); falling back to local store.")
-        return self._fallback.search(query_embedding, top_k, score_threshold, user_id)
+        return self._fallback.search(query_embedding, top_k, score_threshold, user_id, document_id)
 
     def delete_document(self, document_id: str, user_id: Optional[str] = None) -> int:
         if self.mongo_client:
@@ -285,5 +302,31 @@ class MongoAtlasVectorStore(BaseVectorStore):
         return self._fallback.delete_document(document_id, user_id)
 
     def list_documents(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        if self.mongo_client:
+            try:
+                col = self.mongo_client[self.db_name][self.collection_name]
+                match = {"user_id": user_id} if user_id else {}
+                pipeline = [
+                    {"$match": match},
+                    {
+                        "$group": {
+                            "_id": "$document_id",
+                            "document_id": {"$first": "$document_id"},
+                            "user_id": {"$first": "$user_id"},
+                            "filename": {"$first": "$metadata.filename"},
+                            "created_at": {"$first": "$metadata.created_at"},
+                            "total_chunks": {"$sum": 1},
+                        }
+                    },
+                ]
+                docs = list(col.aggregate(pipeline))
+                for d in docs:
+                    d.pop("_id", None)
+                    if not d.get("filename"):
+                        d["filename"] = "Unknown"
+                if docs:
+                    return docs
+            except Exception as e:
+                logger.warning(f"MongoDB Atlas list_documents failed ({e}); using local store.")
         return self._fallback.list_documents(user_id)
 

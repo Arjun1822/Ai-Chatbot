@@ -1,12 +1,18 @@
 services:
+  # Optional Local MongoDB service (activated with: docker-compose --profile local-db up)
   mongodb:
     image: mongo:7.0
     container_name: orbit-mongodb
     restart: unless-stopped
-    ports:
-      - "27017:27017"
+    profiles:
+      - local-db
     environment:
-      MONGO_INITDB_DATABASE: orbit_db
+      MONGO_INITDB_DATABASE: ${DATABASE_NAME:-orbit_ai}
+    # Internal port exposure only; not exposed publicly
+    expose:
+      - "27017"
+    ports:
+      - "127.0.0.1:27017:27017"
     volumes:
       - mongo_data:/data/db
     healthcheck:
@@ -24,18 +30,15 @@ services:
     ports:
       - "5000:5000"
     environment:
-      - FLASK_ENV=production
+      - FLASK_ENV=${FLASK_ENV:-production}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
-      - GEMINI_MODEL=gemini-3.5-flash-lite
-      - MONGODB_URI=mongodb://mongodb:27017/orbit_db
-      - DATABASE_NAME=orbit_db
-      - FRONTEND_URL=http://localhost:3000
-      - SECRET_KEY=${SECRET_KEY:-orbit-secure-production-secret-key-32chars}
-      - RATE_LIMIT_REQUESTS=120
-      - RATE_LIMIT_WINDOW_SECONDS=60
-    depends_on:
-      mongodb:
-        condition: service_healthy
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.5-flash-lite}
+      - MONGODB_URI=${MONGODB_URI}
+      - DATABASE_NAME=${DATABASE_NAME:-orbit_ai}
+      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3000}
+      - SECRET_KEY=${SECRET_KEY}
+      - RATE_LIMIT_REQUESTS=${RATE_LIMIT_REQUESTS:-120}
+      - RATE_LIMIT_WINDOW_SECONDS=${RATE_LIMIT_WINDOW_SECONDS:-60}
     volumes:
       - backend_data:/app/data
 

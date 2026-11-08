@@ -14,15 +14,23 @@ logger = logging.getLogger(__name__)
 class MemoryStore:
     """Thread-safe persistent memory store supporting local JSON and MongoDB."""
 
-    def __init__(self, persistence_path: Optional[str] = None, mongo_client=None, db_name="orbit_db"):
+    def __init__(self, persistence_path: Optional[str] = None, mongo_client=None, db_name="orbit_ai"):
         self._lock = threading.RLock()
         self.persistence_path = persistence_path
         self.mongo_client = mongo_client
-        self.db_name = db_name
+        self.db_name = db_name or "orbit_ai"
         self._memories: Dict[str, MemoryItem] = {}  # id -> MemoryItem
 
         if persistence_path and os.path.exists(persistence_path):
             self._load()
+
+        if self.mongo_client:
+            try:
+                col = self.mongo_client[self.db_name]["user_memories"]
+                col.create_index([("user_id", 1), ("category", 1)])
+                col.create_index([("user_id", 1), ("importance", -1)])
+            except Exception as e:
+                logger.warning(f"Could not initialize MongoDB user_memories indexes: {e}")
 
     def add(self, user_id: str, category: str, content: str, importance: int = 3) -> MemoryItem:
         if not content or not content.strip():
@@ -57,6 +65,18 @@ class MemoryStore:
             return None
 
     def list_by_user(self, user_id: str, category: Optional[str] = None) -> List[MemoryItem]:
+        if self.mongo_client:
+            try:
+                col = self.mongo_client[self.db_name]["user_memories"]
+                query: Dict[str, Any] = {"user_id": user_id}
+                if category:
+                    query["category"] = category.lower()
+                docs = list(col.find(query).sort([("importance", -1), ("updated_at", -1)]))
+                if docs:
+                    return [MemoryItem.from_dict({k: v for k, v in d.items() if k != "_id"}) for d in docs]
+            except Exception:
+                pass
+
         with self._lock:
             results = [
                 m for m in self._memories.values()

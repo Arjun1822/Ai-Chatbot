@@ -20,10 +20,18 @@ class MemoryManager:
         (r"(?:never|always|do not)\s+([a-z0-9\s]{5,60})", "instruction", 4),
     ]
 
-    def __init__(self, memory_store: Optional[MemoryStore] = None, data_dir: Optional[str] = None):
+    def __init__(
+        self,
+        memory_store: Optional[MemoryStore] = None,
+        data_dir: Optional[str] = None,
+        mongo_client=None,
+        db_name="orbit_ai",
+    ):
         base_dir = data_dir or os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
         persistence_path = os.path.join(base_dir, "memories.json")
-        self.store = memory_store or MemoryStore(persistence_path=persistence_path)
+        self.store = memory_store or MemoryStore(
+            persistence_path=persistence_path, mongo_client=mongo_client, db_name=db_name
+        )
 
     def add_memory(self, user_id: str, category: str, content: str, importance: int = 3) -> MemoryItem:
         return self.store.add(user_id, category, content, importance)
