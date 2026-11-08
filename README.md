@@ -22,7 +22,7 @@ ORBIT transforms standard conversational LLMs into an autonomous multi-step reas
 - **RAG Knowledge Base & Retrieval**:
   - Supports PDF (`pypdf`), DOCX (`python-docx`), Markdown, Text, and source code files.
   - Recursive boundary-preserving text chunker with configurable chunk size (500 chars) and overlap (100 chars).
-  - Dense vector embeddings via Google GenAI (`text-embedding-004`) with deterministic offline L2-normalized fallback.
+  - Dense vector embeddings via Google GenAI (`gemini-embedding-001`, 3072 dimensions) with deterministic offline L2-normalized fallback.
   - Exact source attribution and citation chips rendered in assistant responses.
 - **Multi-Tier AI Memory**:
   - Short-term conversation context, episodic summaries, and persistent user preferences.
@@ -117,7 +117,7 @@ Access the application at `http://localhost:3000`.
 
 ## Running Test Suites
 
-### Backend Unit Tests & AI Benchmark (44 Tests)
+### Backend Unit Tests & AI Benchmark (50 Tests)
 ```bash
 backend/.venv/bin/pytest backend/tests/ -v -o pythonpath=backend
 ```
@@ -136,14 +136,15 @@ npm --prefix frontend run build
 
 ## Documentation Roadmap
 
-- [Architecture Specification](ADVANCED_AGENT_ARCHITECTURE.md)
-- [RAG Knowledge Base Guide](RAG_DOCUMENTATION.md)
-- [Persistent AI Memory System](MEMORY_SYSTEM.md)
-- [Secure Tool Calling Specification](TOOL_CALLING_GUIDE.md)
-- [Security & Penetration Guide](SECURITY_GUIDE.md)
-- [Docker Deployment Guide](DOCKER_DEPLOYMENT.md)
-- [Cloud Deployment Architecture](CLOUD_DEPLOYMENT.md)
-- [API Reference Documentation](API_DOCUMENTATION.md)
-- [Verification & Test Suite Report](ADVANCED_AGENT_TEST_REPORT.md)
-- [Production Readiness Audit](PRODUCTION_READINESS_REPORT.md)
-- [Platform Changelog](CHANGELOG.md)
+- [Master Project & Deployment Report](ORBIT_FINAL_PROJECT_REPORT.md) — Consolidated system audit, benchmarks, test evidence, and readiness status
+- [Architecture Specification](ADVANCED_AGENT_ARCHITECTURE.md) — Multi-step reasoning loops, execution manager, and component design
+- [Cloud Deployment Guide (Vercel + Render)](CLOUD_DEPLOYMENT_GUIDE.md) — Step-by-step production runbook for Render, Vercel, and Atlas
+- [Docker Deployment Guide](DOCKER_DEPLOYMENT_GUIDE.md) — Multi-container Docker Compose architectures (Atlas & local-db profiles)
+- [MongoDB Atlas Setup Guide](MONGODB_ATLAS_SETUP.md) — Atlas cluster configuration, network access CIDRs, and database user setup
+- [Atlas Vector Search Configuration](ATLAS_VECTOR_SEARCH_SETUP.md) — 3072-dimensional vector search index creation and testing
+- [API Reference Documentation](API_DOCUMENTATION.md) — Complete REST and Server-Sent Events API specifications
+- [RAG Knowledge Base Guide](RAG_DOCUMENTATION.md) — Multi-format document ingestion, chunking, and semantic citation retrieval
+- [Persistent AI Memory System](MEMORY_SYSTEM.md) — Multi-tier memory model, heuristic preference extraction, and user control APIs
+- [Secure Tool Calling Specification](TOOL_CALLING_GUIDE.md) — AST safe calculator, weather, web search, date/time, and safety guardrails
+- [Security & Threat Mitigation Guide](SECURITY_GUIDE.md) — Defense-in-depth model, PBKDF2/JWT auth, IDOR guards, and anti-DoS controls
+- [Platform Changelog](CHANGELOG.md) — Historical milestone release notes and architectural transformation log
