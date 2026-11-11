@@ -63,8 +63,12 @@ def test_tc_back_01_concurrent_chat_requests(app_and_store):
     app, store, llm = app_and_store
     client = app.test_client()
 
+    from services.auth_service import auth_service
+    user_id = "concurrent_chat_user"
+    token = auth_service.generate_guest_token(guest_id=user_id)
+
     # Create a conversation
-    conv = store.create(title="Concurrency Test")
+    conv = store.create(title="Concurrency Test", user_id=user_id)
     conv_id = conv["_id"]
 
     def send_chat(idx):
@@ -72,7 +76,10 @@ def test_tc_back_01_concurrent_chat_requests(app_and_store):
             return c.post(
                 "/api/chat",
                 json={"conversation_id": conv_id, "message": f"Message {idx}"},
-                headers={"X-Forwarded-For": f"10.0.0.{idx}"},  # Separate IPs to avoid rate limiter
+                headers={
+                    "X-Forwarded-For": f"10.0.0.{idx}",
+                    "Authorization": f"Bearer {token}",
+                },
             )
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
@@ -84,14 +91,18 @@ def test_tc_back_01_concurrent_chat_requests(app_and_store):
         assert res.status_code == 200, f"Expected 200, got {res.status_code}: {res.data}"
 
     # Conversation messages must be appended safely
-    updated = store.get(conv_id)
+    updated = store.get(conv_id, user_id=user_id)
     assert len(updated["messages"]) == 10  # 5 user + 5 assistant messages
 
 
 def test_tc_back_02_concurrent_conversation_updates(app_and_store):
     """Verify concurrent PATCH requests on the same conversation thread without race conditions."""
     app, store, _ = app_and_store
-    conv = store.create(title="Initial Title")
+    from services.auth_service import auth_service
+    user_id = "concurrent_update_user"
+    token = auth_service.generate_guest_token(guest_id=user_id)
+
+    conv = store.create(title="Initial Title", user_id=user_id)
     conv_id = conv["_id"]
 
     def update_title(idx):
@@ -99,7 +110,10 @@ def test_tc_back_02_concurrent_conversation_updates(app_and_store):
             return c.patch(
                 f"/api/conversations/{conv_id}",
                 json={"title": f"Title {idx}"},
-                headers={"X-Forwarded-For": f"10.0.1.{idx}"},
+                headers={
+                    "X-Forwarded-For": f"10.0.1.{idx}",
+                    "Authorization": f"Bearer {token}",
+                },
             )
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
@@ -109,7 +123,7 @@ def test_tc_back_02_concurrent_conversation_updates(app_and_store):
     for res in results:
         assert res.status_code == 200
 
-    updated = store.get(conv_id)
+    updated = store.get(conv_id, user_id=user_id)
     assert updated["title"].startswith("Title ")
 
 

@@ -58,13 +58,17 @@ class MemoryStore:
         return item
 
     def get(self, memory_id: str, user_id: Optional[str] = None) -> Optional[MemoryItem]:
+        if not memory_id or not user_id:
+            return None
         with self._lock:
             item = self._memories.get(memory_id)
-            if item and (not user_id or item.user_id == user_id):
+            if item and item.user_id == user_id:
                 return item
             return None
 
     def list_by_user(self, user_id: str, category: Optional[str] = None) -> List[MemoryItem]:
+        if not user_id:
+            return []
         if self.mongo_client:
             try:
                 col = self.mongo_client[self.db_name]["user_memories"]
@@ -93,6 +97,8 @@ class MemoryStore:
         category: Optional[str] = None,
         importance: Optional[int] = None,
     ) -> Optional[MemoryItem]:
+        if not memory_id or not user_id:
+            return None
         with self._lock:
             item = self._memories.get(memory_id)
             if not item or item.user_id != user_id:
@@ -121,6 +127,8 @@ class MemoryStore:
             return item
 
     def delete(self, memory_id: str, user_id: str) -> bool:
+        if not memory_id or not user_id:
+            return False
         with self._lock:
             item = self._memories.get(memory_id)
             if not item or item.user_id != user_id:

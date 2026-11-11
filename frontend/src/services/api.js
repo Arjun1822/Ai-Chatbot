@@ -13,20 +13,83 @@ const api = axios.create({
   },
 })
 
-// Attach authorization token if present in localStorage
-api.interceptors.request.use((config) => {
-  const token = localStorage.getItem('orbit_token')
+// Singleton in-flight promise to bootstrap a single guest session across concurrent initial requests
+let guestSessionPromise = null
+
+export async function ensureGuestSession() {
+  if (localStorage.getItem('orbit_token') || localStorage.getItem('orbit_guest_token')) {
+    return localStorage.getItem('orbit_token') || localStorage.getItem('orbit_guest_token')
+  }
+  if (!guestSessionPromise) {
+    guestSessionPromise = api
+      .get('/auth/guest-session', { _skipBootstrap: true })
+      .then((res) => {
+        const token = res.data?.token
+        if (token && !localStorage.getItem('orbit_token')) {
+          localStorage.setItem('orbit_guest_token', token)
+        }
+        return token
+      })
+      .catch(() => null)
+      .finally(() => {
+        guestSessionPromise = null
+      })
+  }
+  return guestSessionPromise
+}
+
+// Attach authorization token if present in localStorage, bootstrapping guest session on initial flight
+api.interceptors.request.use(async (config) => {
+  if (
+    !config._skipBootstrap &&
+    !localStorage.getItem('orbit_token') &&
+    !localStorage.getItem('orbit_guest_token') &&
+    config.url &&
+    !config.url.includes('/auth/')
+  ) {
+    await ensureGuestSession()
+  }
+
+  const token = localStorage.getItem('orbit_token') || localStorage.getItem('orbit_guest_token')
   if (token) {
     config.headers.Authorization = `Bearer ${token}`
   }
+  // When payload is FormData, delete Content-Type so Axios/browser automatically
+  // generates multipart/form-data with the correct boundary parameter.
+  if (config.data instanceof FormData) {
+    delete config.headers['Content-Type']
+  }
   return config
 })
+
+// Store received guest token in localStorage to maintain session continuity
+api.interceptors.response.use(
+  (response) => {
+    const guestToken = response.headers?.['x-guest-token'] || response.headers?.['X-Guest-Token']
+    if (guestToken && !localStorage.getItem('orbit_token')) {
+      localStorage.setItem('orbit_guest_token', guestToken)
+    }
+    return response
+  },
+  (error) => {
+    if (error.response?.status === 401) {
+      // If token is invalid or expired, purge local storage so client can renew cleanly
+      const hadAuth = error.config?.headers?.Authorization
+      if (hadAuth) {
+        localStorage.removeItem('orbit_token')
+        localStorage.removeItem('orbit_guest_token')
+      }
+    }
+    return Promise.reject(error)
+  }
+)
 
 // System & Health
 export const getHealth = () => api.get('/health')
 export const getMetrics = () => api.get('/admin/metrics')
 
 // Authentication
+export const getGuestSession = () => api.get('/auth/guest-session')
 export const registerUser = (email, password, name) =>
   api.post('/auth/register', { email, password, name })
 export const loginUser = (email, password) =>
@@ -34,6 +97,7 @@ export const loginUser = (email, password) =>
 export const getMe = () => api.get('/auth/me')
 export const logoutUser = () => {
   localStorage.removeItem('orbit_token')
+  localStorage.removeItem('orbit_guest_token')
   return api.post('/auth/logout')
 }
 
@@ -52,10 +116,24 @@ export const sendMessage = (conversationId, message, attachment = null, mode = '
 
 // RAG Documents
 export const listDocuments = () => api.get('/documents')
-export const uploadDocument = (file) => {
-  const formData = new FormData()
-  formData.append('file', file)
-  return api.post('/documents', formData)
+export const uploadDocument = (fileOrData) => {
+  let data = fileOrData
+  // If a File or Blob is passed, package into FormData
+  if (
+    fileOrData &&
+    !(fileOrData instanceof FormData) &&
+    ((typeof File !== 'undefined' && fileOrData instanceof File) ||
+      (typeof Blob !== 'undefined' && fileOrData instanceof Blob) ||
+      fileOrData.name)
+  ) {
+    data = new FormData()
+    data.append('file', fileOrData)
+  }
+
+  const isFormData = data instanceof FormData
+  return api.post('/documents', data, {
+    headers: isFormData ? { 'Content-Type': undefined } : { 'Content-Type': 'application/json' },
+  })
 }
 export const deleteDocument = (id) => api.delete(`/documents/${id}`)
 
@@ -77,7 +155,7 @@ export async function streamMessage(
 ) {
   try {
     const headers = { 'Content-Type': 'application/json' }
-    const token = localStorage.getItem('orbit_token')
+    const token = localStorage.getItem('orbit_token') || localStorage.getItem('orbit_guest_token')
     if (token) {
       headers.Authorization = `Bearer ${token}`
     }

@@ -47,13 +47,21 @@ class UserStore:
             except Exception as e:
                 logger.warning(f"Could not initialize MongoDB users index: {e}")
 
-    def create_user(self, email: str, password: str, name: Optional[str] = None) -> Dict[str, Any]:
+    def create_user(
+        self,
+        email: str,
+        password: str,
+        name: Optional[str] = None,
+        role: str = "user",
+    ) -> Dict[str, Any]:
         clean_email = email.strip().lower()
         if not self._is_valid_email(clean_email):
             raise ValueError("Invalid email format.")
 
         if not password or len(password) < 8:
             raise ValueError("Password must be at least 8 characters long.")
+
+        user_role = "admin" if role == "admin" else "user"
 
         if self.mongo_client:
             try:
@@ -79,6 +87,7 @@ class UserStore:
                 "id": user_id,
                 "email": clean_email,
                 "name": (name or clean_email.split("@")[0]).strip()[:50],
+                "role": user_role,
                 "salt": salt.hex(),
                 "password_hash": pwd_hash,
                 "created_at": now_iso,
@@ -154,6 +163,35 @@ class UserStore:
             if uid:
                 return self.get_by_id(uid)
         return None
+
+    def set_user_role(self, user_id: str, role: str) -> Optional[Dict[str, Any]]:
+        """Update a user's role. Restricted to trusted server-side management processes."""
+        clean_role = "admin" if role == "admin" else "user"
+        now_iso = datetime.now(timezone.utc).isoformat()
+        user_doc = None
+
+        with self._lock:
+            if user_id in self._users:
+                self._users[user_id]["role"] = clean_role
+                self._users[user_id]["updated_at"] = now_iso
+                user_doc = deepcopy(self._users[user_id])
+                self._save()
+
+        if self.mongo_client:
+            try:
+                col = self.mongo_client[self.db_name]["users"]
+                col.update_one(
+                    {"_id": user_id},
+                    {"$set": {"role": clean_role, "updated_at": now_iso}},
+                )
+                if not user_doc:
+                    mongo_doc = col.find_one({"_id": user_id})
+                    if mongo_doc:
+                        user_doc = mongo_doc
+            except Exception as e:
+                logger.warning(f"MongoDB set_user_role failed: {e}")
+
+        return self._sanitize(user_doc) if user_doc else None
 
     @staticmethod
     def _sanitize(user_doc: Dict[str, Any]) -> Dict[str, Any]:

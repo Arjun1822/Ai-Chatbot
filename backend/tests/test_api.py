@@ -1,3 +1,4 @@
+import io
 import json
 from unittest.mock import MagicMock, patch
 import pytest
@@ -222,3 +223,106 @@ def test_llm_service_mocked_generation():
     assert meta["prompt_tokens"] == 5
     assert meta["candidates_tokens"] == 3
     assert meta["total_tokens"] == 8
+
+
+def _sample_pdf_bytes():
+    return (
+        b"%PDF-1.4\n"
+        b"1 0 obj <</Type /Catalog /Pages 2 0 R>> endobj\n"
+        b"2 0 obj <</Type /Pages /Kids [3 0 R] /Count 1>> endobj\n"
+        b"3 0 obj <</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources <</Font <</F1 5 0 R>>>>>> endobj\n"
+        b"4 0 obj <</Length 44>> stream\n"
+        b"BT /F1 12 Tf 100 700 Td (Hello ORBIT AI PDF) Tj ET\n"
+        b"endstream\n"
+        b"endobj\n"
+        b"5 0 obj <</Type /Font /Subtype /Type1 /BaseFont /Helvetica>> endobj\n"
+        b"xref\n0 6\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n0000000115 00000 n \n0000000244 00000 n \n0000000338 00000 n \n"
+        b"trailer <</Size 6 /Root 1 0 R>>\nstartxref\n417\n%%EOF\n"
+    )
+
+
+def test_document_upload_valid_pdf(client):
+    test_client, _ = client
+    pdf_bytes = _sample_pdf_bytes()
+    data = {"file": (io.BytesIO(pdf_bytes), "sample.pdf")}
+    resp = test_client.post("/api/documents", data=data, content_type="multipart/form-data")
+    assert resp.status_code == 201
+    assert "document" in resp.json
+    doc = resp.json["document"]
+    assert doc["filename"] == "sample.pdf"
+    assert doc["total_chunks"] >= 1
+
+
+def test_document_upload_valid_text(client):
+    test_client, _ = client
+    # 1. Multipart text upload
+    txt_data = {"file": (io.BytesIO(b"Artificial Intelligence in orbit."), "notes.txt")}
+    resp = test_client.post("/api/documents", data=txt_data, content_type="multipart/form-data")
+    assert resp.status_code == 201
+    assert resp.json["document"]["filename"] == "notes.txt"
+
+    # 2. JSON document upload
+    json_payload = {"filename": "guide.md", "content": "# ORBIT AI Guide\n\nComprehensive user instructions."}
+    resp_json = test_client.post("/api/documents", json=json_payload)
+    assert resp_json.status_code == 201
+    assert resp_json.json["document"]["filename"] == "guide.md"
+
+
+def test_document_upload_missing_file_and_content(client):
+    test_client, _ = client
+    # 1. Missing both file and content (empty body)
+    resp = test_client.post("/api/documents", json={})
+    assert resp.status_code == 400
+    assert "File or filename and content is required." in resp.json["error"]
+
+    # 2. No file selected (empty filename)
+    empty_fn_data = {"file": (io.BytesIO(b"content"), "")}
+    resp = test_client.post("/api/documents", data=empty_fn_data, content_type="multipart/form-data")
+    assert resp.status_code == 400
+    assert "No file selected." in resp.json["error"]
+
+    # 3. Empty file (0 bytes)
+    empty_bytes_data = {"file": (io.BytesIO(b""), "empty.txt")}
+    resp = test_client.post("/api/documents", data=empty_bytes_data, content_type="multipart/form-data")
+    assert resp.status_code == 400
+    assert "File is empty (0 bytes)." in resp.json["error"]
+
+
+def test_document_upload_unsupported_file_type(client):
+    test_client, _ = client
+    bad_data = {"file": (io.BytesIO(b"MZ\x90\x00executable binary"), "virus.exe")}
+    resp = test_client.post("/api/documents", data=bad_data, content_type="multipart/form-data")
+    assert resp.status_code == 400
+    assert "Unsupported file format" in resp.json["error"]
+
+
+def test_document_upload_unauthenticated(client):
+    test_client, _ = client
+    # 1. Unauthenticated request without Authorization header succeeds under isolated guest session
+    txt_data = {"file": (io.BytesIO(b"Guest knowledge document."), "guest_doc.txt")}
+    resp = test_client.post("/api/documents", data=txt_data, content_type="multipart/form-data")
+    assert resp.status_code == 201
+    assert resp.json["document"]["user_id"].startswith("guest_")
+    assert "X-Guest-Token" in resp.headers
+
+    # 2. Invalid or expired token is rejected with 401
+    bad_token_data = {"file": (io.BytesIO(b"Unauthorized data."), "secret.txt")}
+    resp_bad = test_client.post(
+        "/api/documents",
+        data=bad_token_data,
+        content_type="multipart/form-data",
+        headers={"Authorization": "Bearer invalid.jwt.token"},
+    )
+    assert resp_bad.status_code == 401
+    assert "Invalid or expired token." in resp_bad.json["error"]
+
+    # 3. Malformed Authorization header format is rejected with 401
+    malformed_data = {"file": (io.BytesIO(b"Malformed auth data."), "secret2.txt")}
+    resp_malformed = test_client.post(
+        "/api/documents",
+        data=malformed_data,
+        content_type="multipart/form-data",
+        headers={"Authorization": "Basic 12345"},
+    )
+    assert resp_malformed.status_code == 401
+    assert "Invalid Authorization header format" in resp_malformed.json["error"]

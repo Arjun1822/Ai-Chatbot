@@ -34,9 +34,12 @@ class RAGService:
         self,
         filename: str,
         file_bytes: bytes,
-        user_id: str = "default_user",
+        user_id: str,
     ) -> Dict[str, Any]:
         """Extract, chunk, embed, and index a document."""
+        if not user_id:
+            raise ValueError("user_id is required for document ingestion.")
+
         text, meta = DocumentExtractor.extract_text(filename, file_bytes)
 
         document_id = f"doc_{uuid.uuid4().hex[:12]}"
@@ -75,7 +78,7 @@ class RAGService:
         document_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Retrieve most relevant document chunks and assemble formatted context and citations."""
-        if not query or not query.strip():
+        if not query or not query.strip() or not user_id:
             return {"context": "", "citations": [], "results_count": 0}
 
         query_emb = self.embedding_service.embed_text(query)
@@ -115,10 +118,12 @@ class RAGService:
         }
 
     def delete_document(self, document_id: str, user_id: Optional[str] = None) -> int:
+        if not user_id or not document_id:
+            return 0
         return self.vector_store.delete_document(document_id, user_id=user_id)
 
-    def list_documents(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
-        return self.vector_store.list_documents(user_id=user_id)
+    def list_documents(self, user_id: Optional[str] = None, all_users: bool = False) -> List[Dict[str, Any]]:
+        return self.vector_store.list_documents(user_id=user_id, all_users=all_users)
 
     def search(
         self,
@@ -128,6 +133,8 @@ class RAGService:
         user_id: Optional[str] = None,
         document_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
+        if not query or not query.strip() or not user_id:
+            return []
         """Convenience search alias returning structured citation list."""
         res = self.query_documents(
             query=query,

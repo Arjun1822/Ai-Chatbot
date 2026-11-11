@@ -65,12 +65,13 @@ class ConversationStore:
         except Exception:
             return False
 
-    def create(self, title="New conversation", user_id="default_user"):
+    def create(self, title="New conversation", user_id=None):
         timestamp = now()
         safe_title = (title or "New conversation").strip()[:100]
+        eff_uid = user_id or f"guest_{uuid4().hex[:12]}"
         conversation = {
             "_id": str(uuid4()),
-            "user_id": user_id or "default_user",
+            "user_id": eff_uid,
             "title": safe_title,
             "messages": [],
             "created_at": timestamp,
@@ -86,17 +87,19 @@ class ConversationStore:
                 self._items[conversation["_id"]] = conversation
         return serialize(conversation)
 
-    def list(self, user_id=None):
+    def list(self, user_id=None, all_users: bool = False):
+        if not user_id and not all_users:
+            return []
         if self.collection is not None:
-            query = {"user_id": user_id} if user_id else {}
+            query = {} if all_users else {"user_id": user_id}
             items = self.collection.find(query, {"messages": 0}).sort("updated_at", -1)
             return [serialize(item) for item in items]
         with self._lock:
             all_items = self._items.values()
-            if user_id:
+            if not all_users:
                 all_items = [
                     x for x in all_items
-                    if x.get("user_id") == user_id or "user_id" not in x
+                    if x.get("user_id") == user_id
                 ]
             sorted_items = sorted(
                 all_items,
@@ -111,42 +114,42 @@ class ConversationStore:
             return summary_items
 
     def get(self, conversation_id, user_id=None):
+        if not conversation_id or not user_id:
+            return None
         if self.collection is not None:
-            query = {"_id": conversation_id}
-            if user_id:
-                query["user_id"] = user_id
+            query = {"_id": conversation_id, "user_id": user_id}
             item = self.collection.find_one(query)
         else:
             with self._lock:
                 item = self._items.get(conversation_id)
-                if item and user_id and item.get("user_id") and item.get("user_id") != user_id:
+                if item and item.get("user_id") != user_id:
                     item = None
         return serialize(item) if item else None
 
     def delete(self, conversation_id, user_id=None):
+        if not conversation_id or not user_id:
+            return False
         if self.collection is not None:
-            query = {"_id": conversation_id}
-            if user_id:
-                query["user_id"] = user_id
+            query = {"_id": conversation_id, "user_id": user_id}
             return self.collection.delete_one(query).deleted_count == 1
         with self._lock:
             item = self._items.get(conversation_id)
             if not item:
                 return False
-            if user_id and item.get("user_id") and item.get("user_id") != user_id:
+            if item.get("user_id") != user_id:
                 return False
             return self._items.pop(conversation_id, None) is not None
 
     def append_messages(self, conversation_id, messages, title=None, user_id=None):
+        if not conversation_id or not user_id:
+            return None
         timestamp = now()
         update_fields = {"updated_at": timestamp}
         if title:
             update_fields["title"] = title.strip()[:100]
 
         if self.collection is not None:
-            query = {"_id": conversation_id}
-            if user_id:
-                query["user_id"] = user_id
+            query = {"_id": conversation_id, "user_id": user_id}
             update = {"$push": {"messages": {"$each": messages}}, "$set": update_fields}
             result = self.collection.update_one(query, update)
             if result.matched_count == 0:
@@ -154,9 +157,7 @@ class ConversationStore:
         else:
             with self._lock:
                 item = self._items.get(conversation_id)
-                if not item:
-                    return None
-                if user_id and item.get("user_id") and item.get("user_id") != user_id:
+                if not item or item.get("user_id") != user_id:
                     return None
                 item["messages"].extend(deepcopy(messages))
                 item["updated_at"] = timestamp
@@ -166,6 +167,8 @@ class ConversationStore:
         return self.get(conversation_id, user_id=user_id)
 
     def update_metadata(self, conversation_id, data, user_id=None):
+        if not conversation_id or not user_id:
+            return None
         allowed = {}
         if "title" in data and isinstance(data["title"], str) and data["title"].strip():
             allowed["title"] = data["title"].strip()[:100]
@@ -177,16 +180,14 @@ class ConversationStore:
         allowed["updated_at"] = timestamp
 
         if self.collection is not None:
-            query = {"_id": conversation_id}
-            if user_id:
-                query["user_id"] = user_id
+            query = {"_id": conversation_id, "user_id": user_id}
             result = self.collection.update_one(query, {"$set": allowed})
             return self.get(conversation_id, user_id=user_id) if result.matched_count else None
         with self._lock:
             item = self._items.get(conversation_id)
             if not item:
                 return None
-            if user_id and item.get("user_id") and item.get("user_id") != user_id:
+            if item.get("user_id") != user_id:
                 return None
             item.update(allowed)
             return self.get(conversation_id, user_id=user_id)

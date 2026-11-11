@@ -45,7 +45,9 @@ class AgentOrchestrator:
         """Wire RAGService query into the tool registry's document_search tool."""
         rag = self.rag_service
 
-        def search_docs(query: str, top_k: int = 3, user_id: str = "default_user") -> Dict[str, Any]:
+        def search_docs(query: str, top_k: int = 3, user_id: Optional[str] = None) -> Dict[str, Any]:
+            if not user_id:
+                return {"message": "No matching documents found for query.", "documents": []}
             res = rag.query_documents(query, top_k=top_k, user_id=user_id)
             if not res["citations"]:
                 return {"message": "No matching documents found for query.", "documents": []}
@@ -79,12 +81,13 @@ class AgentOrchestrator:
         self,
         messages: List[Dict[str, Any]],
         mode: str = "chat",
-        user_id: str = "default_user",
+        user_id: Optional[str] = None,
         conversation_id: Optional[str] = None,
     ) -> Generator[Dict[str, Any], None, None]:
         """Generator yielding SSE event dictionaries."""
         start_time = time.time()
         agent_exec_id = f"exec_{uuid.uuid4().hex[:10]}"
+        eff_uid = user_id or f"guest_{uuid.uuid4().hex[:12]}"
 
         # Normalize mode
         clean_mode = mode.lower().strip() if mode else "chat"
@@ -95,19 +98,19 @@ class AgentOrchestrator:
         last_user_msg = next((m.get("content", "") for m in reversed(messages) if m.get("role") == "user"), "")
         if last_user_msg:
             try:
-                self.memory_manager.auto_extract_memories(user_id, last_user_msg)
+                self.memory_manager.auto_extract_memories(eff_uid, last_user_msg)
             except Exception as e:
                 logger.debug(f"Auto-extraction error: {e}")
 
         # Retrieve user memory context
-        memory_context = self.memory_manager.format_system_memory_context(user_id, last_user_msg)
+        memory_context = self.memory_manager.format_system_memory_context(eff_uid, last_user_msg)
 
         citations: List[Dict[str, Any]] = []
 
         if clean_mode == "document":
             yield from self._stream_document_mode(
                 messages=messages,
-                user_id=user_id,
+                user_id=eff_uid,
                 memory_context=memory_context,
                 start_time=start_time,
                 agent_exec_id=agent_exec_id,
@@ -115,7 +118,7 @@ class AgentOrchestrator:
         elif clean_mode == "agent":
             yield from self._stream_agent_mode(
                 messages=messages,
-                user_id=user_id,
+                user_id=eff_uid,
                 memory_context=memory_context,
                 start_time=start_time,
                 agent_exec_id=agent_exec_id,

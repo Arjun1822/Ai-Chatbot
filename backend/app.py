@@ -17,7 +17,7 @@ from database import DatabaseManager
 from memory.memory_manager import MemoryManager
 from rag.rag_service import RAGService
 from rag.vector_store import MongoAtlasVectorStore
-from services.auth_service import auth_service, get_current_user_from_request, require_auth
+from services.auth_service import auth_service, get_current_user_from_request, require_auth, require_admin
 from services.conversation_store import ConversationStore
 from services.llm_service import LLMService
 from services.user_store import UserStore
@@ -80,8 +80,8 @@ def create_app(config_class=Config, store=None, llm=None, user_st=None, rag_svc=
             r"/api/*": {
                 "origins": allowed_origins,
                 "methods": ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-                "allow_headers": ["Content-Type", "Authorization", "X-Requested-With", "Accept"],
-                "expose_headers": ["Content-Type", "Authorization"],
+                "allow_headers": ["Content-Type", "Authorization", "X-Requested-With", "Accept", "X-Guest-Token", "X-Auth-Token"],
+                "expose_headers": ["Content-Type", "Authorization", "X-Guest-Token"],
             }
         },
         supports_credentials=False,
@@ -128,6 +128,7 @@ def create_app(config_class=Config, store=None, llm=None, user_st=None, rag_svc=
         mongo_client=db_client,
         db_name=database_name,
     )
+    auth_service.set_user_store(user_store)
     vector_store = (
         MongoAtlasVectorStore(mongo_client=db_client, db_name=database_name)
         if db_client is not None
@@ -159,9 +160,27 @@ def create_app(config_class=Config, store=None, llm=None, user_st=None, rag_svc=
 
     def get_user_id():
         user = get_current_user_from_request()
-        if not user or user.get("is_guest"):
+        if not user:
             return None
         return user.get("id")
+
+    @app.before_request
+    def validate_auth_header():
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header and not auth_header.startswith("Bearer "):
+            return jsonify(error="Invalid Authorization header format. Must be Bearer <token>"), 401
+        token = None
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:].strip()
+        elif "X-Auth-Token" in request.headers:
+            token = request.headers["X-Auth-Token"].strip()
+        elif "X-Guest-Token" in request.headers:
+            token = request.headers["X-Guest-Token"].strip()
+
+        if token is not None:
+            user = auth_service.verify_token(token)
+            if not user:
+                return jsonify(error="Invalid or expired token."), 401
 
     @app.after_request
     def set_security_headers(response):
@@ -169,6 +188,9 @@ def create_app(config_class=Config, store=None, llm=None, user_st=None, rag_svc=
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+        new_guest_token = getattr(g, "new_guest_token", None)
+        if new_guest_token:
+            response.headers["X-Guest-Token"] = new_guest_token
         return response
 
     @app.errorhandler(400)
@@ -220,13 +242,14 @@ def create_app(config_class=Config, store=None, llm=None, user_st=None, rag_svc=
         return jsonify(ping_res), status_code
 
     @app.get("/api/admin/metrics")
+    @require_admin()
     def get_metrics():
         uid = get_user_id()
         return jsonify(
             metrics={
-                "conversations_count": len(conversation_store.list(user_id=None)),
-                "documents_count": len(rag_service.list_documents(user_id=None)),
-                "memories_count": len(memory_manager.get_user_memories(user_id=uid)),
+                "conversations_count": len(conversation_store.list(all_users=True)),
+                "documents_count": len(rag_service.list_documents(all_users=True)),
+                "memories_count": len(memory_manager.get_user_memories(user_id=uid)) if uid else 0,
                 "database_mode": "mongodb" if conversation_store.using_mongodb else "in-memory",
                 "tools_available": [t.name for t in orchestrator.tool_registry.list_tools()],
             }
@@ -235,6 +258,18 @@ def create_app(config_class=Config, store=None, llm=None, user_st=None, rag_svc=
     # =========================================================================
     # AUTHENTICATION
     # =========================================================================
+    @app.route("/api/auth/guest-session", methods=["GET", "POST"])
+    def get_or_create_guest_session():
+        user = get_current_user_from_request()
+        if not user:
+            return jsonify(error="Failed to initialize session."), 500
+        token = getattr(g, "new_guest_token", None) or auth_service.generate_guest_token(guest_id=user["id"])
+        return jsonify(
+            guest_id=user["id"],
+            token=token,
+            is_guest=bool(user.get("is_guest", True)),
+        ), 200
+
     @app.post("/api/auth/register")
     def register():
         payload = request.get_json(silent=True) or {}
@@ -246,7 +281,8 @@ def create_app(config_class=Config, store=None, llm=None, user_st=None, rag_svc=
             return jsonify(error="Email and password are required."), 400
 
         try:
-            user = user_store.create_user(email=email, password=password, name=name)
+            # Public registration strictly forces role="user"; client input cannot escalate role
+            user = user_store.create_user(email=email, password=password, name=name, role="user")
             token = auth_service.generate_token(user)
             return jsonify(user=user, token=token), 201
         except ValueError as e:
@@ -271,7 +307,9 @@ def create_app(config_class=Config, store=None, llm=None, user_st=None, rag_svc=
     @app.get("/api/auth/me")
     @require_auth(strict=True)
     def get_me():
-        return jsonify(user=g.current_user)
+        uid = g.current_user.get("id")
+        live_user = user_store.get_by_id(uid) if uid else None
+        return jsonify(user=live_user or g.current_user)
 
     @app.post("/api/auth/logout")
     def logout():
@@ -282,9 +320,9 @@ def create_app(config_class=Config, store=None, llm=None, user_st=None, rag_svc=
     # =========================================================================
     @app.get("/api/conversations")
     def list_conversations():
-        user = get_current_user_from_request()
-        # For non-guest users, isolate by user_id. For guests, show all unassigned/guest
-        uid = user["id"] if user and not user.get("is_guest") else None
+        uid = get_user_id()
+        if not uid:
+            return jsonify(conversations=[])
         return jsonify(conversations=conversation_store.list(user_id=uid))
 
     @app.post("/api/conversations")
@@ -295,11 +333,15 @@ def create_app(config_class=Config, store=None, llm=None, user_st=None, rag_svc=
         payload = request.get_json(silent=True) or {}
         title = payload.get("title", "New conversation")
         uid = get_user_id()
+        if not uid:
+            return jsonify(error="Authentication required or invalid session."), 401
         return jsonify(conversation=conversation_store.create(title=title, user_id=uid)), 201
 
     @app.get("/api/conversations/<conversation_id>")
     def get_conversation(conversation_id):
         uid = get_user_id()
+        if not uid:
+            return jsonify(error="Conversation not found."), 404
         conversation = conversation_store.get(conversation_id, user_id=uid)
         if not conversation:
             return jsonify(error="Conversation not found."), 404
@@ -308,7 +350,7 @@ def create_app(config_class=Config, store=None, llm=None, user_st=None, rag_svc=
     @app.delete("/api/conversations/<conversation_id>")
     def delete_conversation(conversation_id):
         uid = get_user_id()
-        if not conversation_store.delete(conversation_id, user_id=uid):
+        if not uid or not conversation_store.delete(conversation_id, user_id=uid):
             return jsonify(error="Conversation not found."), 404
         return jsonify(message="Conversation deleted.")
 
@@ -319,6 +361,8 @@ def create_app(config_class=Config, store=None, llm=None, user_st=None, rag_svc=
         if not isinstance(title, str) or not title.strip():
             return jsonify(error="A non-empty title string is required."), 400
         uid = get_user_id()
+        if not uid:
+            return jsonify(error="Conversation not found."), 404
         conversation = conversation_store.update_metadata(
             conversation_id, {"title": title.strip()}, user_id=uid
         )
@@ -335,28 +379,53 @@ def create_app(config_class=Config, store=None, llm=None, user_st=None, rag_svc=
         if rate_limiter.is_limited(client_ip):
             return jsonify(error="Rate limit exceeded. Please wait a moment."), 429
 
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header:
+            if not auth_header.startswith("Bearer "):
+                return jsonify(error="Invalid Authorization header format. Must be Bearer <token>"), 401
+            user = get_current_user_from_request()
+            if not user:
+                return jsonify(error="Invalid or expired token."), 401
+
         uid = get_user_id()
 
-        if "file" in request.files:
-            uploaded = request.files["file"]
+        uploaded = None
+        if request.files:
+            uploaded = (
+                request.files.get("file")
+                or request.files.get("document")
+                or next(iter(request.files.values()), None)
+            )
+
+        file_bytes = None
+        filename = None
+
+        if uploaded is not None:
             if not uploaded.filename:
                 return jsonify(error="No file selected."), 400
             file_bytes = uploaded.read()
             filename = uploaded.filename
         else:
             payload = request.get_json(silent=True) or {}
-            filename = payload.get("filename")
-            content = payload.get("content")
+            filename = payload.get("filename") or request.form.get("filename")
+            content = payload.get("content") or request.form.get("content")
             if not filename or content is None:
                 return jsonify(error="File or filename and content is required."), 400
             if isinstance(content, str):
                 file_bytes = content.encode("utf-8")
+            elif isinstance(content, bytes):
+                file_bytes = content
             else:
                 return jsonify(error="Invalid document content payload."), 400
 
-        eff_uid = uid or "default_user"
+        if not file_bytes:
+            return jsonify(error="File is empty (0 bytes)."), 400
+
+        if not uid:
+            return jsonify(error="Authentication required or invalid session."), 401
+
         try:
-            doc_record = rag_service.ingest_document(filename=filename, file_bytes=file_bytes, user_id=eff_uid)
+            doc_record = rag_service.ingest_document(filename=filename, file_bytes=file_bytes, user_id=uid)
             return jsonify(document=doc_record), 201
         except Exception as e:
             logger.error(f"Document ingestion failed: {e}")
@@ -365,13 +434,17 @@ def create_app(config_class=Config, store=None, llm=None, user_st=None, rag_svc=
     @app.get("/api/documents")
     def list_documents():
         uid = get_user_id()
-        docs = rag_service.list_documents(user_id=uid or "default_user")
+        if not uid:
+            return jsonify(documents=[])
+        docs = rag_service.list_documents(user_id=uid)
         return jsonify(documents=docs)
 
     @app.delete("/api/documents/<document_id>")
     def delete_document(document_id):
         uid = get_user_id()
-        deleted = rag_service.delete_document(document_id, user_id=uid or "default_user")
+        if not uid:
+            return jsonify(error="Authentication required or invalid session."), 401
+        deleted = rag_service.delete_document(document_id, user_id=uid)
         if not deleted:
             return jsonify(error="Document not found or could not be deleted."), 404
         return jsonify(message="Document deleted successfully.", deleted_chunks=deleted)
@@ -382,8 +455,10 @@ def create_app(config_class=Config, store=None, llm=None, user_st=None, rag_svc=
     @app.get("/api/memories")
     def list_memories():
         uid = get_user_id()
+        if not uid:
+            return jsonify(memories=[])
         cat = request.args.get("category")
-        memories = memory_manager.get_user_memories(user_id=uid or "default_user", category=cat)
+        memories = memory_manager.get_user_memories(user_id=uid, category=cat)
         return jsonify(memories=[m.to_dict() for m in memories])
 
     @app.post("/api/memories")
@@ -397,16 +472,20 @@ def create_app(config_class=Config, store=None, llm=None, user_st=None, rag_svc=
             return jsonify(error="Content must be a non-empty string."), 400
 
         uid = get_user_id()
-        item = memory_manager.add_memory(user_id=uid or "default_user", category=category, content=content, importance=importance)
+        if not uid:
+            return jsonify(error="Authentication required or invalid session."), 401
+        item = memory_manager.add_memory(user_id=uid, category=category, content=content, importance=importance)
         return jsonify(memory=item.to_dict()), 201
 
     @app.patch("/api/memories/<memory_id>")
     def update_memory(memory_id):
         payload = request.get_json(silent=True) or {}
         uid = get_user_id()
+        if not uid:
+            return jsonify(error="Memory not found."), 404
         updated = memory_manager.update_memory(
             memory_id=memory_id,
-            user_id=uid or "default_user",
+            user_id=uid,
             content=payload.get("content"),
             category=payload.get("category"),
             importance=payload.get("importance"),
@@ -418,7 +497,9 @@ def create_app(config_class=Config, store=None, llm=None, user_st=None, rag_svc=
     @app.delete("/api/memories/<memory_id>")
     def delete_memory(memory_id):
         uid = get_user_id()
-        deleted = memory_manager.delete_memory(memory_id=memory_id, user_id=uid or "default_user")
+        if not uid:
+            return jsonify(error="Memory not found."), 404
+        deleted = memory_manager.delete_memory(memory_id=memory_id, user_id=uid)
         if not deleted:
             return jsonify(error="Memory not found."), 404
         return jsonify(message="Memory deleted.")
@@ -441,6 +522,8 @@ def create_app(config_class=Config, store=None, llm=None, user_st=None, rag_svc=
         attachment = payload.get("attachment")
         mode = payload.get("mode", "chat")
         uid = get_user_id()
+        if not uid:
+            return jsonify(error="Authentication required or invalid session."), 401
 
         if not isinstance(message, str) or not message.strip():
             return jsonify(error="message must be a non-empty string."), 400
@@ -517,6 +600,8 @@ def create_app(config_class=Config, store=None, llm=None, user_st=None, rag_svc=
         attachment = payload.get("attachment")
         mode = payload.get("mode", "chat")
         uid = get_user_id()
+        if not uid:
+            return jsonify(error="Authentication required or invalid session."), 401
 
         if not isinstance(message, str) or not message.strip():
             return jsonify(error="message must be a non-empty string."), 400

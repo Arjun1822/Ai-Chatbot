@@ -28,7 +28,7 @@ class BaseVectorStore(ABC):
         self,
         chunks: List[DocumentChunk],
         embeddings: List[List[float]],
-        user_id: str = "default_user",
+        user_id: str,
     ) -> None:
         pass
 
@@ -48,7 +48,7 @@ class BaseVectorStore(ABC):
         pass
 
     @abstractmethod
-    def list_documents(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    def list_documents(self, user_id: Optional[str] = None, all_users: bool = False) -> List[Dict[str, Any]]:
         pass
 
 
@@ -67,8 +67,10 @@ class LocalVectorStore(BaseVectorStore):
         self,
         chunks: List[DocumentChunk],
         embeddings: List[List[float]],
-        user_id: str = "default_user",
+        user_id: str,
     ) -> None:
+        if not user_id:
+            raise ValueError("user_id is required to index document chunks.")
         if len(chunks) != len(embeddings):
             raise ValueError("Chunks count must match embeddings count.")
 
@@ -108,11 +110,15 @@ class LocalVectorStore(BaseVectorStore):
         user_id: Optional[str] = None,
         document_id: Optional[str] = None,
     ) -> List[SearchResult]:
+        # Strict tenant boundary: unauthenticated or empty user queries return nothing
+        if not user_id:
+            return []
+
         with self._lock:
             scored_results: List[SearchResult] = []
             for item in self._items.values():
                 # Isolation check
-                if user_id and item.get("user_id") != user_id:
+                if item.get("user_id") != user_id:
                     continue
                 if document_id and item.get("document_id") != document_id:
                     continue
@@ -125,7 +131,7 @@ class LocalVectorStore(BaseVectorStore):
                         SearchResult(
                             chunk_id=item["chunk_id"],
                             document_id=item["document_id"],
-                            user_id=item.get("user_id", "default_user"),
+                            user_id=item["user_id"],
                             text=item["text"],
                             score=float(score),
                             metadata=item["metadata"],
@@ -137,28 +143,34 @@ class LocalVectorStore(BaseVectorStore):
             return scored_results[:top_k]
 
     def delete_document(self, document_id: str, user_id: Optional[str] = None) -> int:
+        if not user_id or not document_id:
+            return 0
+
         with self._lock:
             keys_to_del = [
                 cid
                 for cid, item in self._items.items()
-                if item["document_id"] == document_id and (not user_id or item.get("user_id") == user_id)
+                if item["document_id"] == document_id and item.get("user_id") == user_id
             ]
             for cid in keys_to_del:
                 del self._items[cid]
 
             if document_id in self._documents:
-                if not user_id or self._documents[document_id].get("user_id") == user_id:
+                if self._documents[document_id].get("user_id") == user_id:
                     del self._documents[document_id]
 
             if keys_to_del:
                 self._save()
             return len(keys_to_del)
 
-    def list_documents(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    def list_documents(self, user_id: Optional[str] = None, all_users: bool = False) -> List[Dict[str, Any]]:
+        if not user_id and not all_users:
+            return []
+
         with self._lock:
             docs = []
             for doc in self._documents.values():
-                if not user_id or doc.get("user_id") == user_id:
+                if all_users or doc.get("user_id") == user_id:
                     docs.append(dict(doc))
             return docs
 
@@ -201,8 +213,10 @@ class MongoAtlasVectorStore(BaseVectorStore):
         self,
         chunks: List[DocumentChunk],
         embeddings: List[List[float]],
-        user_id: str = "default_user",
+        user_id: str,
     ) -> None:
+        if not user_id:
+            raise ValueError("user_id is required to index document chunks.")
         self._fallback.add_chunks(chunks, embeddings, user_id=user_id)
         if self.mongo_client:
             try:
@@ -231,6 +245,10 @@ class MongoAtlasVectorStore(BaseVectorStore):
         user_id: Optional[str] = None,
         document_id: Optional[str] = None,
     ) -> List[SearchResult]:
+        # Strict tenant boundary: unauthenticated or empty user queries return nothing
+        if not user_id:
+            return []
+
         if self.mongo_client:
             try:
                 col = self.mongo_client[self.db_name][self.collection_name]
@@ -242,18 +260,15 @@ class MongoAtlasVectorStore(BaseVectorStore):
                     "limit": top_k,
                 }
 
-                # Build filter if user_id or document_id is supplied
-                filter_doc: Dict[str, Any] = {}
-                if user_id:
-                    filter_doc["user_id"] = user_id
+                # Mandatory tenant filter: user_id is strictly required
+                filter_doc: Dict[str, Any] = {"user_id": user_id}
                 if document_id:
                     filter_doc["document_id"] = document_id
 
-                if filter_doc:
-                    if len(filter_doc) == 1:
-                        vector_search_stage["filter"] = filter_doc
-                    else:
-                        vector_search_stage["filter"] = {"$and": [{k: v} for k, v in filter_doc.items()]}
+                if len(filter_doc) == 1:
+                    vector_search_stage["filter"] = filter_doc
+                else:
+                    vector_search_stage["filter"] = {"$and": [{k: v} for k, v in filter_doc.items()]}
 
                 pipeline = [
                     {"$vectorSearch": vector_search_stage},
@@ -271,12 +286,15 @@ class MongoAtlasVectorStore(BaseVectorStore):
                 cursor = col.aggregate(pipeline)
                 results = []
                 for doc in cursor:
+                    # Defense-in-depth: enforce user_id match on returned doc
+                    if doc.get("user_id") != user_id:
+                        continue
                     if doc.get("score", 0.0) >= score_threshold:
                         results.append(
                             SearchResult(
                                 chunk_id=doc["_id"],
                                 document_id=doc["document_id"],
-                                user_id=doc.get("user_id", "default_user"),
+                                user_id=doc["user_id"],
                                 text=doc["text"],
                                 score=float(doc.get("score", 0.0)),
                                 metadata=doc.get("metadata", {}),
@@ -289,23 +307,27 @@ class MongoAtlasVectorStore(BaseVectorStore):
         return self._fallback.search(query_embedding, top_k, score_threshold, user_id, document_id)
 
     def delete_document(self, document_id: str, user_id: Optional[str] = None) -> int:
+        if not user_id or not document_id:
+            return 0
         if self.mongo_client:
             try:
                 col = self.mongo_client[self.db_name][self.collection_name]
-                query: Dict[str, Any] = {"document_id": document_id}
-                if user_id:
-                    query["user_id"] = user_id
+                query: Dict[str, Any] = {"document_id": document_id, "user_id": user_id}
                 res = col.delete_many(query)
-                return res.deleted_count
+                deleted_count = res.deleted_count
+                self._fallback.delete_document(document_id, user_id)
+                return deleted_count
             except Exception as e:
                 logger.warning(f"MongoDB Atlas vector delete failed ({e}); falling back to local store.")
         return self._fallback.delete_document(document_id, user_id)
 
-    def list_documents(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    def list_documents(self, user_id: Optional[str] = None, all_users: bool = False) -> List[Dict[str, Any]]:
+        if not user_id and not all_users:
+            return []
         if self.mongo_client:
             try:
                 col = self.mongo_client[self.db_name][self.collection_name]
-                match = {"user_id": user_id} if user_id else {}
+                match = {} if all_users else {"user_id": user_id}
                 pipeline = [
                     {"$match": match},
                     {
@@ -324,9 +346,8 @@ class MongoAtlasVectorStore(BaseVectorStore):
                     d.pop("_id", None)
                     if not d.get("filename"):
                         d["filename"] = "Unknown"
-                if docs:
-                    return docs
+                return docs
             except Exception as e:
                 logger.warning(f"MongoDB Atlas list_documents failed ({e}); using local store.")
-        return self._fallback.list_documents(user_id)
+        return self._fallback.list_documents(user_id, all_users=all_users)
 
