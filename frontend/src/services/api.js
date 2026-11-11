@@ -8,9 +8,6 @@ const BASE_URL = cleanUrl.endsWith('/api') ? cleanUrl : `${cleanUrl}/api`
 const api = axios.create({
   baseURL: BASE_URL,
   timeout: 60000,
-  headers: {
-    'Content-Type': 'application/json',
-  },
 })
 
 // Singleton in-flight promise to bootstrap a single guest session across concurrent initial requests
@@ -57,7 +54,13 @@ api.interceptors.request.use(async (config) => {
   // When payload is FormData, delete Content-Type so Axios/browser automatically
   // generates multipart/form-data with the correct boundary parameter.
   if (config.data instanceof FormData) {
-    delete config.headers['Content-Type']
+    if (config.headers && typeof config.headers.delete === 'function') {
+      config.headers.delete('Content-Type')
+      config.headers.delete('content-type')
+    } else if (config.headers) {
+      delete config.headers['Content-Type']
+      delete config.headers['content-type']
+    }
   }
   return config
 })
@@ -116,23 +119,21 @@ export const sendMessage = (conversationId, message, attachment = null, mode = '
 
 // RAG Documents
 export const listDocuments = () => api.get('/documents')
-export const uploadDocument = (fileOrData) => {
-  let data = fileOrData
-  // If a File or Blob is passed, package into FormData
-  if (
-    fileOrData &&
-    !(fileOrData instanceof FormData) &&
-    ((typeof File !== 'undefined' && fileOrData instanceof File) ||
-      (typeof Blob !== 'undefined' && fileOrData instanceof Blob) ||
-      fileOrData.name)
-  ) {
-    data = new FormData()
-    data.append('file', fileOrData)
+export const uploadDocument = async (file) => {
+  let formData
+  if (file instanceof FormData) {
+    formData = file
+  } else {
+    formData = new FormData()
+    if (file) {
+      formData.append('file', file, file.name)
+    }
   }
 
-  const isFormData = data instanceof FormData
-  return api.post('/documents', data, {
-    headers: isFormData ? { 'Content-Type': undefined } : { 'Content-Type': 'application/json' },
+  return api.post('/documents', formData, {
+    headers: {
+      'Content-Type': undefined,
+    },
   })
 }
 export const deleteDocument = (id) => api.delete(`/documents/${id}`)

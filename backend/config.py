@@ -87,6 +87,33 @@ class Config:
     )
 
     @classmethod
+    def is_production_mode(cls) -> bool:
+        """Robust, fail-closed detection of production environments with strict precedence.
+
+        Render indicators, production environment variables, and Atlas database
+        configuration take absolute precedence over development defaults. A production
+        deployment NEVER becomes development merely because FLASK_ENV is set incorrectly.
+        """
+        # 1. Render cloud hosting indicators (highest precedence)
+        if bool(os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID")):
+            return True
+
+        # 2. Production environment variables
+        flask_val = getattr(cls, "FLASK_ENV", None)
+        flask_env = str(flask_val if flask_val is not None else os.getenv("FLASK_ENV", "")).strip().lower()
+        env = str(os.getenv("ENV", "") or os.getenv("ENVIRONMENT", "") or os.getenv("NODE_ENV", "")).strip().lower()
+        if flask_env == "production" or env == "production":
+            return True
+
+        # 3. Atlas database configuration (takes absolute precedence over development settings)
+        uri_val = getattr(cls, "MONGODB_URI", None)
+        mongo_uri = str(uri_val if uri_val is not None else os.getenv("MONGODB_URI", "")).lower()
+        if "mongodb+srv://" in mongo_uri or ".mongodb.net" in mongo_uri:
+            return True
+
+        return False
+
+    @classmethod
     def validate_configuration(cls) -> Dict[str, Any]:
         """Validate startup configuration and return safety diagnostics."""
         diagnostics = {

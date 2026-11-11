@@ -48,6 +48,46 @@ describe('Knowledge Base Document Upload & Service Integration', () => {
     expect(capturedHeaders.Authorization).toBe('Bearer test-jwt-token-xyz')
   })
 
+  test('uploadDocument attaches guest token when authenticated user token is absent', async () => {
+    localStorage.setItem('orbit_guest_token', 'guest-jwt-token-abc')
+    let capturedHeaders = null
+
+    jest.spyOn(api, 'post').mockImplementation((url, data, config) => {
+      capturedHeaders = { ...config?.headers }
+      const token = localStorage.getItem('orbit_token') || localStorage.getItem('orbit_guest_token')
+      if (token) {
+        capturedHeaders.Authorization = `Bearer ${token}`
+      }
+      return Promise.resolve({ data: { document: { document_id: 'doc_3' } } })
+    })
+
+    const file = new File(['guest data'], 'guest_notes.txt', { type: 'text/plain' })
+    await uploadDocument(file)
+
+    expect(capturedHeaders.Authorization).toBe('Bearer guest-jwt-token-abc')
+  })
+
+  test('FormData payload preserves filename and binary content without JSON conversion', async () => {
+    let capturedData = null
+    let capturedConfig = null
+
+    jest.spyOn(api, 'post').mockImplementation((url, data, config) => {
+      capturedData = data
+      capturedConfig = config
+      return Promise.resolve({ data: { document: { document_id: 'doc_4' } } })
+    })
+
+    const file = new File(['%PDF-1.4 test binary'], 'test_manual.pdf', { type: 'application/pdf' })
+    await uploadDocument(file)
+
+    expect(capturedData instanceof FormData).toBe(true)
+    const uploadedFile = capturedData.get('file')
+    expect(uploadedFile).toBeTruthy()
+    expect(uploadedFile.name).toBe('test_manual.pdf')
+    expect(uploadedFile.type).toBe('application/pdf')
+    expect(capturedConfig.headers['Content-Type']).toBeUndefined()
+  })
+
   test('KnowledgeBaseModal uploads selected document and renders success message', async () => {
     jest.spyOn(apiModule, 'listDocuments').mockResolvedValue({
       data: { documents: [] },

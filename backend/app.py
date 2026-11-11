@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import json
 import logging
 import os
+import sys
 from threading import Lock
 from time import monotonic
 import uuid
@@ -15,6 +16,7 @@ from agent.orchestrator import AgentOrchestrator
 from config import Config
 from database import DatabaseManager
 from memory.memory_manager import MemoryManager
+from rag.embeddings import EmbeddingError
 from rag.rag_service import RAGService
 from rag.vector_store import MongoAtlasVectorStore
 from services.auth_service import auth_service, get_current_user_from_request, require_auth, require_admin
@@ -102,8 +104,17 @@ def create_app(config_class=Config, store=None, llm=None, user_st=None, rag_svc=
         config_class.validate_configuration()
 
     # Production Failure Safety: Never silently fall back to volatile storage in production
-    allow_fallback = os.getenv("ALLOW_EPHEMERAL_STORAGE", "false").lower() == "true"
-    if flask_env == "production" and not allow_fallback:
+    try:
+        is_prod = (
+            config_class.is_production_mode()
+            if hasattr(config_class, "is_production_mode")
+            else (flask_env == "production")
+        )
+    except Exception as err:
+        logger.error(f"Production mode detection failed ({err}). Failing closed to production mode.")
+        is_prod = True
+
+    if is_prod:
         secret_key = app.config.get("SECRET_KEY", "")
         if not secret_key or secret_key == "dev-only-change-me" or len(secret_key) < 32:
             raise RuntimeError(
@@ -134,7 +145,18 @@ def create_app(config_class=Config, store=None, llm=None, user_st=None, rag_svc=
         if db_client is not None
         else None
     )
-    rag_service = rag_svc or RAGService(vector_store=vector_store, data_dir=data_dir)
+    # Production fallback must ALWAYS be disabled.
+    # Neither ALLOW_FALLBACK nor ALLOW_EPHEMERAL_STORAGE may override production protection.
+    if is_prod:
+        rag_allow_fallback = False
+    else:
+        rag_allow_fallback = (os.getenv("ALLOW_FALLBACK", "true").lower() != "false")
+
+    rag_service = rag_svc or RAGService(
+        vector_store=vector_store,
+        data_dir=data_dir,
+        allow_fallback=rag_allow_fallback,
+    )
     memory_manager = mem_mgr or MemoryManager(
         data_dir=data_dir,
         mongo_client=db_client,
@@ -226,7 +248,7 @@ def create_app(config_class=Config, store=None, llm=None, user_st=None, rag_svc=
         db_connected = db_ping.get("connected", False)
         return jsonify(
             status="ok",
-            database="connected" if db_connected else ("unconfigured" if db_ping.get("status") == "unconfigured" else "in-memory"),
+            database="connected" if db_connected else "in-memory",
             database_type="atlas" if db_ping.get("is_atlas") else ("mongodb" if db_connected else "in-memory"),
             database_name=database_name,
             llm_configured=llm_service.configured,
@@ -379,6 +401,11 @@ def create_app(config_class=Config, store=None, llm=None, user_st=None, rag_svc=
         if rate_limiter.is_limited(client_ip):
             return jsonify(error="Rate limit exceeded. Please wait a moment."), 429
 
+        logger.info(
+            f"Document upload initiated | Content-Type: {request.content_type!r} | "
+            f"Files keys: {list(request.files.keys())}"
+        )
+
         auth_header = request.headers.get("Authorization", "")
         if auth_header:
             if not auth_header.startswith("Bearer "):
@@ -405,11 +432,18 @@ def create_app(config_class=Config, store=None, llm=None, user_st=None, rag_svc=
                 return jsonify(error="No file selected."), 400
             file_bytes = uploaded.read()
             filename = uploaded.filename
+            logger.info(
+                f"Multipart file received | Filename: {filename!r} | Size: {len(file_bytes)} bytes"
+            )
         else:
             payload = request.get_json(silent=True) or {}
             filename = payload.get("filename") or request.form.get("filename")
             content = payload.get("content") or request.form.get("content")
             if not filename or content is None:
+                logger.warning(
+                    f"Document upload missing file/content | Content-Type: {request.content_type!r} | "
+                    f"Files keys: {list(request.files.keys())} | JSON payload keys: {list(payload.keys())}"
+                )
                 return jsonify(error="File or filename and content is required."), 400
             if isinstance(content, str):
                 file_bytes = content.encode("utf-8")
@@ -417,6 +451,9 @@ def create_app(config_class=Config, store=None, llm=None, user_st=None, rag_svc=
                 file_bytes = content
             else:
                 return jsonify(error="Invalid document content payload."), 400
+            logger.info(
+                f"JSON/form document received | Filename: {filename!r} | Size: {len(file_bytes)} bytes"
+            )
 
         if not file_bytes:
             return jsonify(error="File is empty (0 bytes)."), 400
@@ -426,9 +463,17 @@ def create_app(config_class=Config, store=None, llm=None, user_st=None, rag_svc=
 
         try:
             doc_record = rag_service.ingest_document(filename=filename, file_bytes=file_bytes, user_id=uid)
+            logger.info(
+                f"Document successfully indexed | Document ID: {doc_record.get('document_id')} | "
+                f"Chunks: {doc_record.get('total_chunks')} | User ID: {uid} | "
+                f"Model: {doc_record.get('embedding_model')}"
+            )
             return jsonify(document=doc_record), 201
+        except EmbeddingError as e:
+            logger.error(f"Document embedding generation failed for {filename!r}: {e}")
+            return jsonify(error=f"Document embedding failed: {str(e)}"), 503
         except Exception as e:
-            logger.error(f"Document ingestion failed: {e}")
+            logger.error(f"Document ingestion failed for {filename!r}: {e}")
             return jsonify(error=f"Document ingestion failed: {str(e)}"), 400
 
     @app.get("/api/documents")
@@ -709,7 +754,12 @@ def create_app(config_class=Config, store=None, llm=None, user_st=None, rag_svc=
     return app
 
 
-app = create_app()
+# Create application instance for WSGI runners (e.g. gunicorn app:app)
+# When executing under pytest or test runners, bypass eager creation of the default app
+if "pytest" not in sys.modules and not os.getenv("PYTEST_CURRENT_TEST"):
+    app = create_app()
+else:
+    app = None
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=5000, debug=True)

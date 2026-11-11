@@ -29,6 +29,7 @@ class BaseVectorStore(ABC):
         chunks: List[DocumentChunk],
         embeddings: List[List[float]],
         user_id: str,
+        embedding_model: str = "gemini-embedding-001",
     ) -> None:
         pass
 
@@ -40,6 +41,7 @@ class BaseVectorStore(ABC):
         score_threshold: float = 0.0,
         user_id: Optional[str] = None,
         document_id: Optional[str] = None,
+        query_model: Optional[str] = None,
     ) -> List[SearchResult]:
         pass
 
@@ -55,9 +57,10 @@ class BaseVectorStore(ABC):
 class LocalVectorStore(BaseVectorStore):
     """Thread-safe in-memory vector store with optional JSON disk persistence."""
 
-    def __init__(self, persistence_path: Optional[str] = None):
+    def __init__(self, persistence_path: Optional[str] = None, expected_dimension: Optional[int] = None):
         self._lock = threading.RLock()
         self._persistence_path = persistence_path
+        self.expected_dimension = expected_dimension
         self._items: Dict[str, Dict[str, Any]] = {}  # chunk_id -> item dict
         self._documents: Dict[str, Dict[str, Any]] = {}  # doc_id -> doc metadata
         if persistence_path and os.path.exists(persistence_path):
@@ -68,11 +71,21 @@ class LocalVectorStore(BaseVectorStore):
         chunks: List[DocumentChunk],
         embeddings: List[List[float]],
         user_id: str,
+        embedding_model: str = "gemini-embedding-001",
     ) -> None:
         if not user_id:
             raise ValueError("user_id is required to index document chunks.")
         if len(chunks) != len(embeddings):
             raise ValueError("Chunks count must match embeddings count.")
+        if not embeddings:
+            return
+
+        expected_dim = self.expected_dimension or len(embeddings[0])
+        for emb in embeddings:
+            if len(emb) != expected_dim:
+                raise ValueError(
+                    f"Embedding vector dimension mismatch: expected {expected_dim}, got {len(emb)}"
+                )
 
         with self._lock:
             for chunk, emb in zip(chunks, embeddings):
@@ -83,9 +96,10 @@ class LocalVectorStore(BaseVectorStore):
                     "chunk_index": chunk.chunk_index,
                     "text": chunk.text,
                     "embedding": emb,
+                    "embedding_model": embedding_model,
                     "char_start": chunk.char_start,
                     "char_end": chunk.char_end,
-                    "metadata": chunk.metadata,
+                    "metadata": {**chunk.metadata, "embedding_model": embedding_model},
                 }
                 # Track document metadata
                 doc_id = chunk.document_id
@@ -96,6 +110,7 @@ class LocalVectorStore(BaseVectorStore):
                         "filename": chunk.metadata.get("filename", "Unknown"),
                         "total_chunks": 1,
                         "created_at": chunk.metadata.get("created_at"),
+                        "embedding_model": embedding_model,
                     }
                 else:
                     self._documents[doc_id]["total_chunks"] += 1
@@ -109,10 +124,16 @@ class LocalVectorStore(BaseVectorStore):
         score_threshold: float = 0.0,
         user_id: Optional[str] = None,
         document_id: Optional[str] = None,
+        query_model: Optional[str] = None,
     ) -> List[SearchResult]:
         # Strict tenant boundary: unauthenticated or empty user queries return nothing
         if not user_id:
             return []
+
+        if self.expected_dimension and len(query_embedding) != self.expected_dimension:
+            raise ValueError(
+                f"Query embedding dimension mismatch: expected {self.expected_dimension}, got {len(query_embedding)}"
+            )
 
         with self._lock:
             scored_results: List[SearchResult] = []
@@ -124,6 +145,16 @@ class LocalVectorStore(BaseVectorStore):
                     continue
 
                 emb = item["embedding"]
+                if len(query_embedding) != len(emb):
+                    raise ValueError(
+                        f"Query embedding dimension mismatch: expected {len(emb)}, got {len(query_embedding)}"
+                    )
+
+                # Model compatibility check: reject cross-space comparison and untracked records
+                item_model = item.get("embedding_model") or item.get("metadata", {}).get("embedding_model")
+                if query_model and item_model != query_model:
+                    continue
+
                 # Cosine similarity for unit-normalized vectors: dot product
                 score = sum(q * d for q, d in zip(query_embedding, emb))
                 if score >= score_threshold:
@@ -203,21 +234,30 @@ class LocalVectorStore(BaseVectorStore):
 class MongoAtlasVectorStore(BaseVectorStore):
     """MongoDB Atlas Vector Store implementation with fallback to LocalVectorStore."""
 
+    EXPECTED_DIMENSION = 3072
+
     def __init__(self, mongo_client=None, db_name="orbit_ai", collection_name="vector_embeddings"):
         self.mongo_client = mongo_client
         self.db_name = db_name or "orbit_ai"
         self.collection_name = collection_name
-        self._fallback = LocalVectorStore()
+        self._fallback = LocalVectorStore(expected_dimension=self.EXPECTED_DIMENSION)
 
     def add_chunks(
         self,
         chunks: List[DocumentChunk],
         embeddings: List[List[float]],
         user_id: str,
+        embedding_model: str = "gemini-embedding-001",
     ) -> None:
         if not user_id:
             raise ValueError("user_id is required to index document chunks.")
-        self._fallback.add_chunks(chunks, embeddings, user_id=user_id)
+        for emb in embeddings:
+            if len(emb) != self.EXPECTED_DIMENSION:
+                raise ValueError(
+                    f"Embedding vector dimension mismatch: expected {self.EXPECTED_DIMENSION}, got {len(emb)}"
+                )
+
+        self._fallback.add_chunks(chunks, embeddings, user_id=user_id, embedding_model=embedding_model)
         if self.mongo_client:
             try:
                 col = self.mongo_client[self.db_name][self.collection_name]
@@ -230,7 +270,8 @@ class MongoAtlasVectorStore(BaseVectorStore):
                         "chunk_index": chunk.chunk_index,
                         "text": chunk.text,
                         "embedding": emb,
-                        "metadata": chunk.metadata,
+                        "embedding_model": embedding_model,
+                        "metadata": {**chunk.metadata, "embedding_model": embedding_model},
                     })
                 if docs:
                     col.insert_many(docs, ordered=False)
@@ -244,10 +285,16 @@ class MongoAtlasVectorStore(BaseVectorStore):
         score_threshold: float = 0.0,
         user_id: Optional[str] = None,
         document_id: Optional[str] = None,
+        query_model: Optional[str] = None,
     ) -> List[SearchResult]:
         # Strict tenant boundary: unauthenticated or empty user queries return nothing
         if not user_id:
             return []
+
+        if len(query_embedding) != self.EXPECTED_DIMENSION:
+            raise ValueError(
+                f"Query embedding dimension mismatch: expected {self.EXPECTED_DIMENSION}, got {len(query_embedding)}"
+            )
 
         if self.mongo_client:
             try:
@@ -260,10 +307,12 @@ class MongoAtlasVectorStore(BaseVectorStore):
                     "limit": top_k,
                 }
 
-                # Mandatory tenant filter: user_id is strictly required
+                # Mandatory tenant & model filter: user_id is strictly required
                 filter_doc: Dict[str, Any] = {"user_id": user_id}
                 if document_id:
                     filter_doc["document_id"] = document_id
+                if query_model:
+                    filter_doc["embedding_model"] = query_model
 
                 if len(filter_doc) == 1:
                     vector_search_stage["filter"] = filter_doc
@@ -279,6 +328,7 @@ class MongoAtlasVectorStore(BaseVectorStore):
                             "user_id": 1,
                             "text": 1,
                             "metadata": 1,
+                            "embedding_model": 1,
                             "score": {"$meta": "vectorSearchScore"},
                         }
                     },
@@ -288,6 +338,10 @@ class MongoAtlasVectorStore(BaseVectorStore):
                 for doc in cursor:
                     # Defense-in-depth: enforce user_id match on returned doc
                     if doc.get("user_id") != user_id:
+                        continue
+                    # Model compatibility defense-in-depth: exclude cross-model or untracked legacy records
+                    doc_model = doc.get("embedding_model") or doc.get("metadata", {}).get("embedding_model")
+                    if query_model and doc_model != query_model:
                         continue
                     if doc.get("score", 0.0) >= score_threshold:
                         results.append(
@@ -304,7 +358,9 @@ class MongoAtlasVectorStore(BaseVectorStore):
                     return results
             except Exception as e:
                 logger.warning(f"MongoDB Atlas vector search failed ({e}); falling back to local store.")
-        return self._fallback.search(query_embedding, top_k, score_threshold, user_id, document_id)
+        return self._fallback.search(
+            query_embedding, top_k, score_threshold, user_id, document_id, query_model=query_model
+        )
 
     def delete_document(self, document_id: str, user_id: Optional[str] = None) -> int:
         if not user_id or not document_id:

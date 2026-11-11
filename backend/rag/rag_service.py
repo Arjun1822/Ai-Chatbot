@@ -22,12 +22,13 @@ class RAGService:
         chunk_size: int = 500,
         chunk_overlap: int = 100,
         data_dir: Optional[str] = None,
+        allow_fallback: Optional[bool] = None,
     ):
         base_dir = data_dir or os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
         persistence_path = os.path.join(base_dir, "vector_store.json")
 
         self.vector_store = vector_store or LocalVectorStore(persistence_path=persistence_path)
-        self.embedding_service = embedding_service or EmbeddingService()
+        self.embedding_service = embedding_service or EmbeddingService(allow_fallback=allow_fallback)
         self.chunker = TextChunker(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
 
     def ingest_document(
@@ -55,9 +56,23 @@ class RAGService:
             raise ValueError("No valid text chunks could be extracted from document.")
 
         chunk_texts = [c.text for c in chunks]
-        embeddings = self.embedding_service.embed_batch(chunk_texts)
+        embeddings, model_name = self.embedding_service.embed_batch_with_model(chunk_texts)
 
-        self.vector_store.add_chunks(chunks, embeddings, user_id=user_id)
+        for chunk in chunks:
+            chunk.metadata["embedding_model"] = model_name
+            chunk.metadata["embedding_dimension"] = len(embeddings[0])
+
+        self.vector_store.add_chunks(
+            chunks,
+            embeddings,
+            user_id=user_id,
+            embedding_model=model_name,
+        )
+
+        meta.update({
+            "embedding_model": model_name,
+            "embedding_dimension": len(embeddings[0]),
+        })
 
         return {
             "document_id": document_id,
@@ -66,6 +81,7 @@ class RAGService:
             "total_chunks": len(chunks),
             "char_count": len(text),
             "created_at": now_iso,
+            "embedding_model": model_name,
             "metadata": meta,
         }
 
@@ -81,13 +97,14 @@ class RAGService:
         if not query or not query.strip() or not user_id:
             return {"context": "", "citations": [], "results_count": 0}
 
-        query_emb = self.embedding_service.embed_text(query)
+        query_emb, query_model = self.embedding_service.embed_text_with_model(query)
         results: List[SearchResult] = self.vector_store.search(
             query_embedding=query_emb,
             top_k=top_k,
             score_threshold=score_threshold,
             user_id=user_id,
             document_id=document_id,
+            query_model=query_model,
         )
 
         if not results:

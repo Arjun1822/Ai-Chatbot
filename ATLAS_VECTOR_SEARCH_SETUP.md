@@ -62,6 +62,10 @@ Replace the default template in the JSON editor with the following definition:
     {
       "type": "filter",
       "path": "document_id"
+    },
+    {
+      "type": "filter",
+      "path": "embedding_model"
     }
   ]
 }
@@ -71,6 +75,7 @@ Replace the default template in the JSON editor with the following definition:
 > - `embedding` (3072 dimensions, cosine): Matches the Google Gemini `gemini-embedding-001` model output.
 > - `user_id` (filter): Enforces strict multi-tenant data isolation so users cannot search or retrieve other users' documents.
 > - `document_id` (filter): Enables scoped retrieval filtering by document.
+> - `embedding_model` (filter): Pre-filters candidates during `$vectorSearch` so fallback or incompatible model vectors cannot enter retrieval.
 
 ### Step 5: Save and Build Index
 1. Click **Create Search Index** (or **Next** -> **Create Index**).
